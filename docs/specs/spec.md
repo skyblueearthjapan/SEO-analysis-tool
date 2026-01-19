@@ -1157,8 +1157,506 @@ COMMIT;
 
 ---
 
+## Appendix E — FastAPI Routes Design (MVP)
+
+> Base URL: `/api/v1`
+> Auth (MVP): optional (token-based). If skipping auth, keep user_id nullable.
+
+### 0. Conventions
+- All responses JSON
+- IDs are UUID strings
+- Pagination: `{items:[], next_cursor?:string}` (MVP can omit)
+- Job processing: async worker updates status (queued/running/done/failed)
+
+### 1. Health
+
+```
+GET /health
+```
+Response:
+```json
+{"status":"ok", "time":"..."}
+```
+
+---
+
+### 2. Sites
+
+```
+POST /sites
+```
+Create a project/site.
+
+Request:
+```json
+{
+  "name": "日本社会人演劇チームSEO"
+}
+```
+
+Response:
+```json
+{
+  "site_id": "...",
+  "name": "...",
+  "created_at": "..."
+}
+```
+
+```
+GET /sites
+```
+Response:
+```json
+{ "items": [ { "site_id":"...", "name":"...", "created_at":"..." } ] }
+```
+
+```
+GET /sites/{site_id}
+```
+Response:
+```json
+{ "site_id":"...", "name":"...", "created_at":"..." }
+```
+
+---
+
+### 3. Pages (URLs)
+
+```
+POST /sites/{site_id}/pages
+```
+Register URL with page_type.
+
+Request:
+```json
+{
+  "url": "https://example.com",
+  "page_type": "official_homepage|competitor_page|third_party_profile_page",
+  "label": "公式トップ"
+}
+```
+
+Response:
+```json
+{
+  "page_id":"...",
+  "site_id":"...",
+  "url":"...",
+  "page_type":"...",
+  "label":"...",
+  "created_at":"..."
+}
+```
+
+```
+GET /sites/{site_id}/pages
+```
+Response:
+```json
+{
+  "items": [
+    {"page_id":"...","url":"...","page_type":"...","label":"...","created_at":"..."}
+  ]
+}
+```
+
+```
+PATCH /sites/{site_id}/pages/{page_id}
+```
+Request (partial):
+```json
+{
+  "label": "競合A",
+  "page_type": "competitor_page"
+}
+```
+Response: updated page object
+
+```
+DELETE /sites/{site_id}/pages/{page_id}
+```
+Response:
+```json
+{ "deleted": true }
+```
+
+---
+
+### 4. Analysis Jobs
+
+```
+POST /sites/{site_id}/analysis-jobs
+```
+Create an analysis run for selected pages.
+
+Request:
+```json
+{
+  "device": "mobile|desktop",
+  "locale": "ja-JP",
+  "target_country": "JP",
+  "enable_pagespeed": true,
+  "enable_gsc": false,
+  "enable_ai_report": true,
+
+  "gsc_property": "sc-domain:example.com",
+  "brand_terms": ["劇団名","日本社会人演劇"],
+
+  "targets": [
+    {"page_id":"...", "role":"official", "sort_order":0},
+    {"page_id":"...", "role":"competitor", "sort_order":1},
+    {"page_id":"...", "role":"competitor", "sort_order":2},
+    {"page_id":"...", "role":"third_party", "sort_order":3}
+  ]
+}
+```
+
+Response:
+```json
+{
+  "job_id":"...",
+  "status":"queued",
+  "created_at":"..."
+}
+```
+
+```
+GET /sites/{site_id}/analysis-jobs
+```
+Response:
+```json
+{
+  "items":[
+    {"job_id":"...","status":"done","created_at":"...","finished_at":"..."}
+  ]
+}
+```
+
+```
+GET /sites/{site_id}/analysis-jobs/{job_id}
+```
+Response:
+```json
+{
+  "job_id":"...",
+  "status":"queued|running|done|failed",
+  "error_message": null,
+  "created_at":"...",
+  "started_at": "...",
+  "finished_at":"...",
+  "targets":[{"page_id":"...","role":"official","sort_order":0}, ...]
+}
+```
+
+```
+POST /sites/{site_id}/analysis-jobs/{job_id}/run
+```
+Optional: trigger execution if jobs are created without auto-run.
+
+Response:
+```json
+{ "ok": true }
+```
+
+---
+
+### 5. Results & Reports
+
+```
+GET /sites/{site_id}/analysis-results?limit=20
+```
+Response:
+```json
+{
+  "items":[
+    {
+      "result_id":"...",
+      "job_id":"...",
+      "generated_at":"...",
+      "diagnosis_main_cause":"content_quality"
+    }
+  ]
+}
+```
+
+```
+GET /sites/{site_id}/analysis-results/{result_id}
+```
+Response:
+```json
+{
+  "result_id":"...",
+  "job_id":"...",
+  "generated_at":"...",
+  "analysis_json": { ...analysis_result.json... }
+}
+```
+
+```
+GET /sites/{site_id}/analysis-results/{result_id}/report
+```
+Response:
+```json
+{
+  "result_id":"...",
+  "report_markdown":"# SEO診断レポート\n..."
+}
+```
+
+```
+POST /sites/{site_id}/analysis-results/{result_id}/report/regenerate
+```
+Re-run AI report generation with same ai_prompt_payload.
+
+Request (optional):
+```json
+{
+  "report_style": "consultant|concise|technical"
+}
+```
+
+Response:
+```json
+{ "ok": true, "report_id":"..." }
+```
+
+---
+
+### 6. UX Helpers (Optional but recommended)
+
+```
+GET /sites/{site_id}/recommended-targets
+```
+Auto-pick best 1 official + 2 competitors if user has many pages registered.
+
+Response:
+```json
+{
+  "targets":[{"page_id":"...","role":"official"}, ...]
+}
+```
+
+```
+GET /sites/{site_id}/presets
+```
+Return UI presets (themes, report styles).
+
+Response:
+```json
+{
+  "themes": ["midnight-neon","graphite","light-minimal"],
+  "report_styles": ["consultant","concise","technical"]
+}
+```
+
+---
+
+## Appendix F — Frontend UI Component Spec (Next.js App Router / TypeScript)
+
+### 0. UI Direction (カッコいい / 洗練 / "男の子が喜ぶ")
+
+**Theme: "Midnight Neon"**
+- Base: deep navy/graphite
+- Accent: electric cyan + violet (控えめに)
+- Surfaces: glassmorphism (blur + subtle border)
+- Motion: fast, snappy, but上品（hoverで僅かに発光/浮く）
+- Typography: bold headings + clean mono for metrics
+- Data viz: line chart for trends, badge chips for scores
+
+**Recommended stack:**
+- Next.js + Tailwind CSS
+- UI: shadcn/ui (Radix基盤) + lucide icons
+- Chart: recharts (or nivo) — minimal aesthetic
+- Markdown: react-markdown + remark-gfm
+
+---
+
+### 1. Pages (Routes)
+
+#### 1.1 `/` (Dashboard)
+
+**Purpose:** 最新解析結果のハイライト + "Run Analysis" CTA
+
+**Components:**
+- `<TopNav />`
+- `<SiteSwitcher />`
+- `<HeroRunCard />` (cool CTA)
+- `<LatestResultCard />` (main cause, scores, P0 todo count)
+- `<RecentRunsTable />`
+- `<QuickActions />` (Add URL / Run analysis)
+
+**Data:**
+- GET /sites
+- GET /sites/{site_id}/analysis-results
+- GET /sites/{site_id}/analysis-jobs
+
+---
+
+#### 1.2 `/sites/[siteId]/pages` (URL管理)
+
+**Purpose:** 公式/競合/紹介記事の登録と整理
+
+**Components:**
+- `<TopNav />`
+- `<PageTypeTabs />` (Official / Competitors / Third-party)
+- `<UrlAddModal />`
+- `<PagesTable />` (label, url, type, actions)
+- `<SelectionTray />` (official1 + competitor2 + thirdParty optional)
+
+**UX:**
+- 公式は1つ選択必須（radio）
+- 競合は最大2つ（checkbox）
+- 紹介記事は任意（checkbox）
+
+**Data:**
+- GET /sites/{siteId}/pages
+- POST /sites/{siteId}/pages
+- PATCH /sites/{siteId}/pages/{pageId}
+- DELETE /sites/{siteId}/pages/{pageId}
+
+---
+
+#### 1.3 `/sites/[siteId]/run` (実行設定)
+
+**Purpose:** デバイス/期間/AIレポートを設定して実行
+
+**Components:**
+- `<RunConfigCard />`
+  - device toggle (Mobile/Desktop)
+  - enable pagespeed toggle
+  - enable gsc toggle (if enabled show property input)
+  - brand terms input chips
+  - report style select (consultant/concise/technical)
+- `<TargetSummaryCard />` (選択済みURL)
+- `<RunButton />` (primary, animated)
+- `<RunProgressToast />`
+
+**Data:**
+- POST /sites/{siteId}/analysis-jobs
+- GET /sites/{siteId}/analysis-jobs/{jobId} (polling)
+
+---
+
+#### 1.4 `/sites/[siteId]/results/[resultId]` (結果ビュー)
+
+**Purpose:** "コンサル級"に見せるメイン画面
+
+**Layout:** 2-column (left: navigation, right: content)
+
+**Components:**
+- `<ResultHeader />`
+  - main cause badge (Content/CTR/Tech)
+  - scores chips (A/B/C/D)
+  - generated_at
+  - actions: Download JSON / Regenerate report
+- `<InsightSummary />`
+  - Top 3 conclusions (from report or derived)
+- `<TodoBoard />`
+  - P0/P1/P2 columns
+  - each card shows impact/effort + evidence tooltip
+- `<CompetitorDiffPanel />`
+  - diff table (h2 count, FAQ schema, pagespeed)
+  - "missing intent items" chips
+- `<ReportMarkdown />` (AI report)
+- `<EvidenceDrawer />` (click to see evidence strings)
+- `<JsonViewerModal />`
+
+**Data:**
+- GET /sites/{siteId}/analysis-results/{resultId}
+- GET /sites/{siteId}/analysis-results/{resultId}/report
+- POST /sites/{siteId}/analysis-results/{resultId}/report/regenerate
+
+---
+
+### 2. Shared UI Components
+
+#### 2.1 Navigation
+- `<TopNav />` brand mark + site switcher + theme toggle
+- `<SideRail />` icons only (Dashboard, Pages, Run, Results)
+
+#### 2.2 Cards
+- `<GlassCard />` (base container)
+- `<MetricChip />` (mono font, subtle border glow)
+- `<ScoreBadge />` (A/B/C/D)
+
+#### 2.3 Forms
+- `<UrlAddModal />`
+  - URL input with validation
+  - page_type select (Official/Competitor/Third-party)
+  - label optional
+- `<BrandTermsChipsInput />`
+
+#### 2.4 Data display
+- `<DiffTable />`
+- `<TodoCard />`
+- `<MarkdownRenderer />`
+
+---
+
+### 3. UI Copy (tone)
+
+Short, punchy, techy:
+- "RUN DIAGNOSTIC"
+- "PRIORITY FIXES (P0)"
+- "WHY THIS MATTERS"
+- "EVIDENCE"
+
+Japanese text in body, but section headers can be EN/JP mix for coolness:
+- "INSIGHTS / 要点"
+- "TODO / 対策"
+- "DIFF / 競合差分"
+
+---
+
+### 4. "かっこいい" Theme Tokens (Tailwind example)
+
+> Colors are conceptual; actual values decided in CSS variables
+
+```css
+:root {
+  --bg: #0B1020;
+  --panel: rgba(255,255,255,0.06);
+  --border: rgba(255,255,255,0.10);
+  --text: rgba(255,255,255,0.92);
+  --muted: rgba(255,255,255,0.70);
+  --accent-cyan: #35D4FF;
+  --accent-violet: #A78BFA;
+}
+```
+
+**Effects:**
+- Backdrop blur: 12px
+- Border: 1px solid var(--border)
+- Glow on hover: `box-shadow: 0 0 0 1px rgba(accent,0.3), 0 0 24px rgba(accent,0.25)`
+
+---
+
+### 5. Minimal Screen Acceptance Criteria (MVP)
+
+- URL登録・選択ができる（公式1 + 競合2 + 紹介記事任意）
+- 実行 → ジョブ進行状況が見える（queued/running/done）
+- 結果画面で以下が見える
+  - main_cause / scores
+  - P0/P1/P2 ToDoカード（最大15）
+  - 競合差分（h2/FAQ/pagespeed）
+  - AIレポート（Markdown）
+  - JSONダウンロード
+
+---
+
+### 6. "カッコよくする"ための実装上のコツ
+
+- **余白をしっかり**（詰め込まない）
+- **ToDoは カード＋優先度カラム**（Trelloっぽく、でも上品に）
+- **スコアは チップ（A/B/C/D）**で瞬時に理解
+- **"根拠"は常時表示せず ツールチップ/ドロワーで見せる**（玄人感）
+
+---
+
 ## 次のステップ（必要なら追記）
 コーディングエージェントがそのまま着手できるように:
-- FastAPIのエンドポイント設計（routes）
-- フロントの画面コンポーネント（URL登録〜レポート表示）
+- Next.jsの画面ワイヤー（各ページのレイアウト骨組み）
+- コンポーネントのprops定義（TypeScript interface）
+- APIクライアント（fetch wrappers）
 まで追記可能。

@@ -1654,9 +1654,634 @@ Japanese text in body, but section headers can be EN/JP mix for coolness:
 
 ---
 
+## Appendix G — Next.js Screen Wireframes + TS Props + API Client
+
+### 0. Font & Readability Spec（視認性＋デザイン）
+
+#### Font Pairing（推奨）
+- **Body (JP):** `"Noto Sans JP"` or `"Zen Kaku Gothic New"`（読みやすい・現代的）
+- **Numbers/Code:** `"JetBrains Mono"`（メトリクスが締まって見える）
+
+#### Typography rules
+- Base font-size: 16px
+- Headings: 600–700 weight
+- Body: 400–500 weight
+- Line height:
+  - Body: 1.7（日本語は気持ち広め）
+  - Headings: 1.2–1.3
+- Metric chips: mono + 12–13px（詰まりすぎない）
+
+#### Color/Contrast rules (dark theme)
+- Main text: opacity 0.92
+- Muted text: opacity 0.70
+- Borders: opacity 0.10
+- Ensure WCAG-ish: text vs bg contrast >= 4.5 recommended
+
+---
+
+### 1. Folder Structure (Next.js App Router)
+
+```
+app/
+  layout.tsx
+  page.tsx                         # Dashboard (default site)
+  sites/[siteId]/
+    layout.tsx                     # Site-scoped layout with SideRail
+    pages/
+      page.tsx                     # URL management
+    run/
+      page.tsx                     # Run config + trigger
+    results/
+      page.tsx                     # Results list
+      [resultId]/
+        page.tsx                   # Result details (main)
+components/
+  ui/                              # shadcn/ui wrappers
+  layout/
+    TopNav.tsx
+    SideRail.tsx
+    GlassCard.tsx
+  sites/
+    SiteSwitcher.tsx
+  pages/
+    PageTypeTabs.tsx
+    PagesTable.tsx
+    UrlAddModal.tsx
+    SelectionTray.tsx
+  run/
+    RunConfigCard.tsx
+    TargetSummaryCard.tsx
+    RunButton.tsx
+    JobStatusBanner.tsx
+  results/
+    ResultHeader.tsx
+    InsightSummary.tsx
+    TodoBoard.tsx
+    TodoCard.tsx
+    CompetitorDiffPanel.tsx
+    ReportMarkdown.tsx
+    EvidenceDrawer.tsx
+    JsonViewerModal.tsx
+lib/
+  api/
+    client.ts                      # fetch wrapper
+    routes.ts                      # endpoint builders
+    types.ts                       # shared TS types
+    queries.ts                     # typed API calls
+  utils/
+    cn.ts
+    format.ts
+styles/
+  globals.css
+```
+
+---
+
+### 2. Screen Wireframes（Layout骨組み）
+
+#### 2.1 `app/layout.tsx`
+- Global providers (theme, toasts)
+- Loads fonts
+- Body uses Body font, metrics components use mono class
+
+**Wireframe:**
+```
+<html>
+  <body class="bg">
+    <TopNav global />
+    <main>{children}</main>
+```
+
+#### 2.2 `app/page.tsx` (Dashboard)
+
+**Goal:** "Run Diagnostic" + latest results highlight
+
+**Wireframe:**
+- Top section: Hero
+  - Title: "SEO DIAGNOSTIC"
+  - Subtitle JP: "公式HP + 競合2URLの差分から、次の一手を提示"
+  - Primary CTA: "RUN DIAGNOSTIC" -> /sites/[siteId]/run
+  - Secondary CTA: "ADD URL" -> /sites/[siteId]/pages
+- Grid:
+  - `<LatestResultCard />`
+  - `<QuickStatsCard />` (P0 count / main cause)
+  - `<RecentRunsTable />`
+
+**Data needs:**
+- sites list (choose default)
+- analysis-results latest (limit=10)
+
+#### 2.3 `app/sites/[siteId]/layout.tsx`
+
+**Wireframe:**
+```
+<div class="grid grid-cols-[72px_1fr]">
+  <SideRail />
+  <div class="p-6">
+    {children}
+  </div>
+</div>
+```
+
+#### 2.4 `app/sites/[siteId]/pages/page.tsx` (URL管理)
+
+**Wireframe:**
+- Header row:
+  - Title: "URL BASE"
+  - Right: `<UrlAddModalTrigger />`
+- `<PageTypeTabs />` (Official / Competitors / Third-party)
+- `<PagesTable />` filtered by tab
+- Bottom sticky: `<SelectionTray />`
+  - Official (radio) 1
+  - Competitors (checkbox) up to 2
+  - Third-party (checkbox) optional
+  - CTA: "CONTINUE" -> /sites/[siteId]/run
+
+#### 2.5 `app/sites/[siteId]/run/page.tsx` (実行設定)
+
+**Wireframe:**
+- Title: "RUN CONFIG"
+- Two-column:
+  - Left:
+    - `<RunConfigCard />` (device toggles, pagespeed, gsc, brand terms, report style)
+    - `<RunButton />`
+    - `<JobStatusBanner />` (after start)
+  - Right:
+    - `<TargetSummaryCard />` (selected URLs)
+    - Help tips card (what data is collected)
+
+**Flow:**
+- POST analysis-job
+- Poll GET job status
+- On done: navigate to latest result detail
+
+#### 2.6 `app/sites/[siteId]/results/page.tsx` (結果一覧)
+
+**Wireframe:**
+- Title: "RESULTS"
+- `<ResultsTable />`
+  - row: generated_at, main_cause badge, link to detail
+
+#### 2.7 `app/sites/[siteId]/results/[resultId]/page.tsx` (結果詳細)
+
+**Wireframe (main):**
+- `<ResultHeader />`
+- 3-column responsive grid:
+  - Left column (desktop):
+    - `<InsightSummary />` (Top 3)
+    - `<CompetitorDiffPanel />`
+  - Middle (main):
+    - `<TodoBoard />` (P0/P1/P2 columns)
+  - Right column:
+    - `<ReportMarkdown />`
+- Floating actions:
+  - Download JSON
+  - Open Evidence Drawer
+  - Regenerate report
+
+---
+
+### 3. TypeScript Types & Props Interfaces
+
+#### 3.1 Shared domain types (`lib/api/types.ts`)
+
+```typescript
+export type UUID = string;
+
+export type PageType = "official_homepage" | "competitor_page" | "third_party_profile_page";
+export type DeviceType = "mobile" | "desktop";
+
+export type JobStatus = "queued" | "running" | "done" | "failed";
+
+export type MainCause = "content_quality" | "ctr" | "technical" | "mixed" | "unknown";
+export type ScoreGrade = "A" | "B" | "C" | "D";
+
+export type TodoPriority = "P0" | "P1" | "P2";
+export type TodoCategory = "content" | "technical" | "ctr" | "outreach" | "internal_linking";
+
+export interface Site {
+  site_id: UUID;
+  name: string;
+  created_at: string;
+}
+
+export interface Page {
+  page_id: UUID;
+  site_id: UUID;
+  url: string;
+  page_type: PageType;
+  label?: string | null;
+  created_at: string;
+}
+
+export interface AnalysisJobTarget {
+  page_id: UUID;
+  role: "official" | "competitor" | "third_party";
+  sort_order: number;
+}
+
+export interface AnalysisJob {
+  job_id: UUID;
+  site_id: UUID;
+  status: JobStatus;
+  error_message?: string | null;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  targets: AnalysisJobTarget[];
+}
+
+export interface Diagnosis {
+  main_cause: MainCause;
+  cause_breakdown: { content_quality: number; ctr: number; technical: number };
+  scores: { content: ScoreGrade; technical: ScoreGrade; ctr: ScoreGrade };
+  evidence: { claim: string; support: string[] }[];
+}
+
+export interface Todo {
+  todo_id: UUID;
+  priority: TodoPriority;
+  category: TodoCategory;
+  title: string;
+  details: string;
+  evidence: string[];
+  impact: "high" | "medium" | "low";
+  effort: "small" | "medium" | "large";
+  examples?: {
+    title_variants?: string[];
+    meta_description_variants?: string[];
+    h2_outline?: string[];
+    faq_questions?: string[];
+    outreach_message_draft_jp?: string;
+  };
+}
+
+export interface AnalysisResultListItem {
+  result_id: UUID;
+  job_id: UUID;
+  generated_at: string;
+  diagnosis_main_cause?: MainCause | null;
+}
+
+export interface AnalysisResult {
+  result_id: UUID;
+  job_id: UUID;
+  generated_at: string;
+  analysis_json: any; // keep raw for now; optional: strongly type later
+}
+
+export interface Report {
+  result_id: UUID;
+  report_markdown: string;
+}
+```
+
+#### 3.2 UI Component Props (`components/*`)
+
+```typescript
+// layout
+export interface TopNavProps {
+  title?: string;
+  rightSlot?: React.ReactNode;
+}
+
+export interface SideRailProps {
+  siteId: UUID;
+  active: "dashboard" | "pages" | "run" | "results";
+}
+
+// pages
+export interface PageTypeTabsProps {
+  value: "official" | "competitor" | "third_party";
+  onChange: (v: PageTypeTabsProps["value"]) => void;
+}
+
+export interface PagesTableProps {
+  pages: Page[];
+  selectedIds: Set<UUID>;
+  selectionMode: "single" | "multi";
+  maxSelect?: number;
+  onToggle: (pageId: UUID) => void;
+  onEdit: (pageId: UUID) => void;
+  onDelete: (pageId: UUID) => void;
+}
+
+export interface UrlAddModalProps {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  onSubmit: (input: { url: string; page_type: PageType; label?: string }) => Promise<void>;
+}
+
+export interface SelectionTrayProps {
+  official?: Page | null;
+  competitors: Page[];
+  thirdParties: Page[];
+  canContinue: boolean;
+  onContinue: () => void;
+}
+
+// run
+export interface RunConfigCardProps {
+  device: DeviceType;
+  onDeviceChange: (v: DeviceType) => void;
+
+  enablePagespeed: boolean;
+  onEnablePagespeed: (v: boolean) => void;
+
+  enableGsc: boolean;
+  onEnableGsc: (v: boolean) => void;
+  gscProperty?: string;
+  onGscProperty: (v: string) => void;
+
+  brandTerms: string[];
+  onBrandTerms: (terms: string[]) => void;
+
+  reportStyle: "consultant" | "concise" | "technical";
+  onReportStyle: (v: RunConfigCardProps["reportStyle"]) => void;
+}
+
+export interface TargetSummaryCardProps {
+  official: Page;
+  competitors: Page[];
+  thirdParties: Page[];
+}
+
+export interface RunButtonProps {
+  disabled: boolean;
+  onClick: () => Promise<void>;
+  loading?: boolean;
+}
+
+export interface JobStatusBannerProps {
+  job?: AnalysisJob | null;
+  onViewResult?: () => void;
+}
+
+// results
+export interface ResultHeaderProps {
+  generatedAt: string;
+  mainCause: MainCause;
+  scores: Diagnosis["scores"];
+  onDownloadJson: () => void;
+  onRegenerateReport: () => Promise<void>;
+  onOpenEvidence: () => void;
+}
+
+export interface InsightSummaryProps {
+  diagnosis: Diagnosis;
+  todos: Todo[];
+}
+
+export interface TodoBoardProps {
+  todos: Todo[];
+  onSelectTodo?: (todo: Todo) => void;
+}
+
+export interface TodoCardProps {
+  todo: Todo;
+  onClick?: () => void;
+}
+
+export interface CompetitorDiffPanelProps {
+  analysisJson: any; // can type later: comparisons
+}
+
+export interface ReportMarkdownProps {
+  markdown: string;
+}
+
+export interface EvidenceDrawerProps {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  evidence: Diagnosis["evidence"];
+}
+
+export interface JsonViewerModalProps {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  json: any;
+}
+```
+
+---
+
+### 4. API Client (fetch wrappers)
+
+#### 4.1 Base fetch client (`lib/api/client.ts`)
+
+```typescript
+export class ApiError extends Error {
+  status: number;
+  payload?: any;
+  constructor(message: string, status: number, payload?: any) {
+    super(message);
+    this.status = status;
+    this.payload = payload;
+  }
+}
+
+type FetchOptions = Omit<RequestInit, "body"> & { body?: any };
+
+export async function apiFetch<T>(path: string, options: FetchOptions = {}): Promise<T> {
+  const res = await fetch(`/api/v1${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {})
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined
+  });
+
+  const contentType = res.headers.get("content-type") || "";
+  const payload = contentType.includes("application/json") ? await res.json() : await res.text();
+
+  if (!res.ok) {
+    throw new ApiError(`API Error: ${res.status}`, res.status, payload);
+  }
+  return payload as T;
+}
+```
+
+#### 4.2 Route builders (`lib/api/routes.ts`)
+
+```typescript
+import type { UUID } from "./types";
+
+export const routes = {
+  health: () => `/health`,
+
+  sites: () => `/sites`,
+  site: (siteId: UUID) => `/sites/${siteId}`,
+
+  pages: (siteId: UUID) => `/sites/${siteId}/pages`,
+  page: (siteId: UUID, pageId: UUID) => `/sites/${siteId}/pages/${pageId}`,
+
+  jobs: (siteId: UUID) => `/sites/${siteId}/analysis-jobs`,
+  job: (siteId: UUID, jobId: UUID) => `/sites/${siteId}/analysis-jobs/${jobId}`,
+  runJob: (siteId: UUID, jobId: UUID) => `/sites/${siteId}/analysis-jobs/${jobId}/run`,
+
+  results: (siteId: UUID) => `/sites/${siteId}/analysis-results`,
+  result: (siteId: UUID, resultId: UUID) => `/sites/${siteId}/analysis-results/${resultId}`,
+  report: (siteId: UUID, resultId: UUID) => `/sites/${siteId}/analysis-results/${resultId}/report`,
+  regenReport: (siteId: UUID, resultId: UUID) => `/sites/${siteId}/analysis-results/${resultId}/report/regenerate`
+};
+```
+
+#### 4.3 Typed API calls (`lib/api/queries.ts`)
+
+```typescript
+import { apiFetch } from "./client";
+import { routes } from "./routes";
+import type {
+  Site, Page, UUID, DeviceType, AnalysisJob, AnalysisJobTarget,
+  AnalysisResultListItem, AnalysisResult, Report
+} from "./types";
+
+export async function listSites(): Promise<{ items: Site[] }> {
+  return apiFetch(routes.sites());
+}
+export async function createSite(input: { name: string }): Promise<Site> {
+  return apiFetch(routes.sites(), { method: "POST", body: input });
+}
+
+export async function listPages(siteId: UUID): Promise<{ items: Page[] }> {
+  return apiFetch(routes.pages(siteId));
+}
+export async function createPage(siteId: UUID, input: { url: string; page_type: Page["page_type"]; label?: string }): Promise<Page> {
+  return apiFetch(routes.pages(siteId), { method: "POST", body: input });
+}
+export async function updatePage(siteId: UUID, pageId: UUID, input: Partial<{ label: string; page_type: Page["page_type"] }>): Promise<Page> {
+  return apiFetch(routes.page(siteId, pageId), { method: "PATCH", body: input });
+}
+export async function deletePage(siteId: UUID, pageId: UUID): Promise<{ deleted: boolean }> {
+  return apiFetch(routes.page(siteId, pageId), { method: "DELETE" });
+}
+
+export async function createAnalysisJob(siteId: UUID, input: {
+  device: DeviceType;
+  locale: string;
+  target_country: string;
+  enable_pagespeed: boolean;
+  enable_gsc: boolean;
+  enable_ai_report: boolean;
+  gsc_property?: string;
+  brand_terms?: string[];
+  targets: AnalysisJobTarget[];
+}): Promise<{ job_id: UUID; status: string; created_at: string }> {
+  return apiFetch(routes.jobs(siteId), { method: "POST", body: input });
+}
+
+export async function getJob(siteId: UUID, jobId: UUID): Promise<AnalysisJob> {
+  return apiFetch(routes.job(siteId, jobId));
+}
+
+export async function listResults(siteId: UUID, limit = 20): Promise<{ items: AnalysisResultListItem[] }> {
+  return apiFetch(`${routes.results(siteId)}?limit=${limit}`);
+}
+export async function getResult(siteId: UUID, resultId: UUID): Promise<AnalysisResult> {
+  return apiFetch(routes.result(siteId, resultId));
+}
+export async function getReport(siteId: UUID, resultId: UUID): Promise<Report> {
+  return apiFetch(routes.report(siteId, resultId));
+}
+export async function regenerateReport(siteId: UUID, resultId: UUID, input?: { report_style?: "consultant" | "concise" | "technical" }): Promise<{ ok: boolean; report_id: UUID }> {
+  return apiFetch(routes.regenReport(siteId, resultId), { method: "POST", body: input || {} });
+}
+```
+
+---
+
+### 5. Page-level Skeleton Code (wireframe snippet examples)
+
+> 目的: "骨組み" を即実装できるように。詳細UIは各コンポーネントで。
+
+#### 5.1 `app/sites/[siteId]/pages/page.tsx` (skeleton)
+
+```typescript
+import { listPages } from "@/lib/api/queries";
+
+export default async function PagesPage({ params }: { params: { siteId: string } }) {
+  const { items } = await listPages(params.siteId);
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">URL BASE</h1>
+          <p className="text-sm text-muted-foreground">公式 / 競合 / 紹介記事を整理して解析ターゲットを選択</p>
+        </div>
+        {/* UrlAddModalTrigger */}
+      </div>
+
+      {/* Tabs + Table + SelectionTray (client components) */}
+      <div className="grid gap-6">
+        {/* PageTypeTabs */}
+        {/* PagesTable */}
+        {/* SelectionTray */}
+      </div>
+    </div>
+  );
+}
+```
+
+#### 5.2 `app/sites/[siteId]/run/page.tsx` (skeleton)
+
+```typescript
+export default function RunPage({ params }: { params: { siteId: string } }) {
+  return (
+    <div className="grid gap-6 lg:grid-cols-2">
+      <div className="space-y-6">
+        {/* RunConfigCard */}
+        {/* RunButton */}
+        {/* JobStatusBanner */}
+      </div>
+      <div className="space-y-6">
+        {/* TargetSummaryCard */}
+        {/* TipsCard */}
+      </div>
+    </div>
+  );
+}
+```
+
+#### 5.3 `app/sites/[siteId]/results/[resultId]/page.tsx` (skeleton)
+
+```typescript
+import { getResult, getReport } from "@/lib/api/queries";
+
+export default async function ResultDetailPage({ params }: { params: { siteId: string; resultId: string } }) {
+  const result = await getResult(params.siteId, params.resultId);
+  const report = await getReport(params.siteId, params.resultId);
+
+  const analysis = result.analysis_json;
+  const diagnosis = analysis.diagnosis;
+  const todos = analysis.todos;
+
+  return (
+    <div className="space-y-6">
+      {/* ResultHeader (client) */}
+      <div className="grid gap-6 xl:grid-cols-3">
+        <div className="space-y-6">
+          {/* InsightSummary */}
+          {/* CompetitorDiffPanel */}
+        </div>
+        <div className="xl:col-span-1 xl:order-none space-y-6">
+          {/* TodoBoard */}
+        </div>
+        <div className="space-y-6">
+          {/* ReportMarkdown */}
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
 ## 次のステップ（必要なら追記）
-コーディングエージェントがそのまま着手できるように:
-- Next.jsの画面ワイヤー（各ページのレイアウト骨組み）
-- コンポーネントのprops定義（TypeScript interface）
-- APIクライアント（fetch wrappers）
-まで追記可能。
+UIの"カッコよさ"が一気に上がるおすすめ追記:
+- `globals.css` のテーマCSS変数（Midnight Neon）具体値
+- `<GlassCard />` と `<ScoreBadge />` の見た目の決め打ち実装
+- 結果ページの ToDoボード（P0/P1/P2）実装（ドラッグはMVP後でもOK）

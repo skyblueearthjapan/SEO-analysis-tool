@@ -629,9 +629,536 @@ P0のimpactは原則 high、effortは small〜medium を選ぶ（最短で効く
 
 ---
 
+## Appendix A — config/thresholds.yml（閾値設定例）
+
+> Note: しきい値は運用で変える前提。まずはMVPの安全寄り設定。
+
+```yaml
+app:
+  schema_version: "0.1"
+  max_queries_per_url: 20
+  max_todos_total: 15
+  max_todos_per_priority: 5
+  default_locale: "ja-JP"
+  default_country: "JP"
+  default_device: "mobile"
+  time_windows_days:
+    short: 7
+    long: 28
+
+technical:
+  # Fetch/indexing
+  require_status_code: 200
+  noindex_keywords:
+    - "noindex"
+  canonical_must_exist: true
+
+  # Mobile hint rules (simple heuristic)
+  mobile_friendly:
+    viewport_required: true
+
+  # PageSpeed (if available)
+  pagespeed:
+    score:
+      A_min: 85
+      B_min: 70
+      C_min: 50
+      D_max: 49
+    lcp_ms:
+      good_max: 2500
+      needs_improvement_max: 4000
+    inp_ms:
+      good_max: 200
+      needs_improvement_max: 500
+    cls:
+      good_max: 0.1
+      needs_improvement_max: 0.25
+
+content:
+  # Official homepage intent coverage items (10)
+  official_intent_items:
+    - "overview"           # 何者か（概要）
+    - "activities"         # 活動内容
+    - "works_or_history"   # 公演/実績
+    - "media_gallery"      # 写真/メディア
+    - "cta_contact"        # 参加/問い合わせ導線
+    - "faq"                # よくある質問
+    - "region"             # 活動地域/所在地
+    - "team_or_operator"   # メンバー/運営情報
+    - "freshness"          # 最新情報/更新性
+    - "audience_branch"    # 観客/参加希望など導線の分岐
+
+  official_grade:
+    A_min: 9
+    B_min: 7
+    C_min: 5
+    D_max: 4
+
+  # Third party profile intent coverage items (6)
+  third_party_intent_items:
+    - "brand_clear"        # 自社名が明確
+    - "description_depth"  # 説明文十分
+    - "unique_points"      # 特徴・差別化
+    - "region_or_genre"    # 地域/ジャンル
+    - "official_link"      # 公式HPリンク
+    - "cta_present"        # 参加/予約導線
+
+  third_party_grade:
+    A_min: 6
+    B_min: 5
+    C_min: 3
+    D_max: 2
+
+  text_rules:
+    third_party_min_chars: 200  # 紹介文の目安（日本語は文字数でOK）
+    alt_ratio_good_min: 0.70
+
+ctr:
+  # CTR判定は Search Console 取得時のみ
+  opportunity:
+    min_impressions_1: 300
+    min_impressions_2: 500
+    pos_max_1: 10
+    pos_max_2: 5
+    ctr_low_ratio_to_median: 0.5
+    ctr_hard_low: 0.03
+
+  grade:
+    A_max_opportunity_ratio: 0.10
+    B_max_opportunity_ratio: 0.20
+    C_max_opportunity_ratio: 0.35
+    D_min_opportunity_ratio: 0.35
+
+comparisons:
+  # 競合差分判定の閾値
+  h2_delta_content_strong: -5
+  missing_intent_items_strong_min: 3
+  faq_schema_delta_strong: -1
+  pagespeed_delta_strong: -15
+
+todos:
+  # 自動ToDo作成の優先度ルール
+  P0:
+    - "indexing_critical"
+    - "ctr_high_opportunity"
+    - "core_sections_missing"
+    - "official_link_missing_on_third_party"
+  P1:
+    - "faq_addition"
+    - "intent_expansion"
+    - "schema_addition"
+    - "internal_linking_plan"
+  P2:
+    - "content_cluster"
+    - "deep_performance_optimization"
+    - "ongoing_outreach"
+
+ai:
+  report_style: "consultant"
+  language: "ja"
+  must_cite_evidence: true
+  no_guessing: true
+```
+
+---
+
+## Appendix B — analysis_pipeline.py（疑似コード / 関数分割）
+
+> 目的: コーディングエージェントがそのまま実装に着手できる粒度。
+> 前提: Python + FastAPI（任意）+ Celery/RQ（任意） or cron/Cloud Scheduler。
+> 入力: URL登録（page_type含む） → 実行 → analysis_result.json保存 → report.md生成
+
+```python
+"""
+analysis_pipeline.py (pseudo)
+
+Modules (suggested):
+- config.py            # thresholds.yml loader
+- fetcher.py           # HTTP fetch + redirect chain
+- parser_html.py       # title/meta/headings/text/images/links
+- parser_schema.py     # JSON-LD schema types extraction
+- pagespeed_client.py  # PageSpeed Insights API client
+- gsc_client.py        # Search Console API client
+- intent_classifier.py # intent coverage + query intent
+- comparator.py        # diff official vs competitors
+- rule_engine.py       # scoring, main_cause, todo generation
+- ai_reporter.py       # prompt build + LLM call + markdown validation
+- storage.py           # DB access + file (json/md) persistence
+"""
+
+from datetime import datetime
+from typing import List, Dict, Any
+
+def run_analysis_job(job_id: str) -> Dict[str, Any]:
+    """
+    Entry point for background job.
+    Loads job config from DB: target urls (official + competitors + third-party pages).
+    Produces analysis_result.json, stores it, optionally triggers AI report generation.
+    """
+    cfg = load_thresholds("config/thresholds.yml")
+    job = db_get_job(job_id)
+
+    # 1) Analyze each page independently
+    pages = []
+    for page in job.pages:  # list of {page_id,url,page_type}
+        pages.append(analyze_single_page(page, cfg, job))
+
+    # 2) Build comparisons (official vs competitors / official vs third-party)
+    comparisons = build_comparisons(pages, cfg, job)
+
+    # 3) Run rule engine (scores, cause, todos)
+    diagnosis, todos = run_rule_engine(pages, comparisons, cfg, job)
+
+    # 4) Build AI prompt payload
+    ai_payload = build_ai_prompt_payload(pages, comparisons, diagnosis, todos, cfg, job)
+
+    # 5) Assemble final analysis_result object
+    result = {
+        "schema_version": cfg["app"]["schema_version"],
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "run_id": job_id,
+        "inputs": build_inputs(job, cfg),
+        "pages": pages,
+        "comparisons": comparisons,
+        "diagnosis": diagnosis,
+        "todos": todos,
+        "ai_prompt_payload": ai_payload
+    }
+
+    # 6) Persist JSON
+    storage_save_analysis_result(job_id, result)  # DB + object storage/file
+
+    # 7) Generate report.md via AI (optional but MVP includes)
+    if job.enable_ai_report:
+        report_md = generate_report_md(ai_payload, cfg)
+        storage_save_report(job_id, report_md)
+
+    # 8) Update job status
+    db_mark_job_done(job_id, success=True)
+    return result
+
+
+def analyze_single_page(page: Dict[str, Any], cfg: Dict[str, Any], job: Any) -> Dict[str, Any]:
+    """
+    Fetch + parse + enrich (pagespeed, gsc if official) + intent coverage.
+    """
+    fetch = http_fetch(page["url"], user_agent=job.user_agent)
+
+    html_doc = parse_html(fetch.html)
+    schema = extract_structured_data(fetch.html)
+
+    # Minimal mobile-friendly hint heuristic
+    mobile_hint = compute_mobile_hint(fetch.html, cfg)
+
+    # PageSpeed optional
+    pagespeed = {"available": False, "performance_score": None, "lcp_ms": None, "inp_ms": None, "cls": None}
+    if job.enable_pagespeed:
+        pagespeed = pagespeed_fetch(page["url"], device=job.device)
+
+    # Search Console only for official_homepage pages (and only if configured)
+    gsc = {"available": False, "time_window_days": None, "top_queries": [], "brand_query_summary": {}}
+    if page["page_type"] == "official_homepage" and job.enable_gsc:
+        gsc = gsc_fetch_url_metrics(
+            site_property=job.gsc_property,
+            url=fetch.final_url,
+            days=cfg["app"]["time_windows_days"]["long"],
+            max_queries=cfg["app"]["max_queries_per_url"]
+        )
+        # Query intent classification (brand/info/compare/price/visit/unknown)
+        gsc["top_queries"] = classify_query_intents(gsc["top_queries"], brand_terms=job.brand_terms)
+
+    # Intent coverage by page type (official vs third party)
+    content = compute_intent_coverage(
+        page_type=page["page_type"],
+        title=html_doc["title"],
+        h2=html_doc["headings"]["h2"],
+        text=html_doc.get("text", ""),
+        links=html_doc.get("links", {}),
+        cfg=cfg,
+        brand_terms=job.brand_terms
+    )
+
+    return {
+        "page_id": page["page_id"],
+        "url": page["url"],
+        "page_type": page["page_type"],
+        "fetch": {
+            "status_code": fetch.status_code,
+            "final_url": fetch.final_url,
+            "redirect_chain": fetch.redirect_chain
+        },
+        "html": {
+            "title": html_doc["title"],
+            "meta_description": html_doc.get("meta_description", ""),
+            "canonical": html_doc.get("canonical", ""),
+            "robots_meta": html_doc.get("robots_meta", ""),
+            "headings": html_doc["headings"],
+            "text_stats": html_doc.get("text_stats", {}),
+            "links": html_doc.get("links", {}),
+            "images": html_doc.get("images", {}),
+            "structured_data": schema
+        },
+        "tech": {
+            "mobile_friendly_hint": mobile_hint,
+            "pagespeed": pagespeed
+        },
+        "content": content,
+        "serp": build_serp_snapshot_if_enabled(page, job, cfg),
+        "search_console": gsc
+    }
+
+
+def build_comparisons(pages: List[Dict[str, Any]], cfg: Dict[str, Any], job: Any) -> List[Dict[str, Any]]:
+    """
+    Create diff objects:
+    - official_vs_competitor for each competitor
+    - official_vs_third_party for each third_party_profile_page (optional)
+    """
+    official = find_page(pages, page_type="official_homepage")
+    competitors = [p for p in pages if p["page_type"] == "competitor_page"]
+    third_parties = [p for p in pages if p["page_type"] == "third_party_profile_page"]
+
+    comparisons = []
+    for comp in competitors:
+        comparisons.append(diff_pages(official, comp, kind="official_vs_competitor", cfg=cfg))
+    for tp in third_parties:
+        comparisons.append(diff_pages(official, tp, kind="official_vs_third_party", cfg=cfg))
+
+    return comparisons
+
+
+def diff_pages(source: Dict[str, Any], target: Dict[str, Any], kind: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Core diff used for both competitor and third-party.
+    """
+    h2_delta = len(source["html"]["headings"]["h2"]) - len(target["html"]["headings"]["h2"])
+    missing_intent_items = compute_missing_intent_items(source["content"]["intent_coverage"], target["content"]["intent_coverage"])
+    faq_delta = int(source["html"]["structured_data"].get("has_faq_schema", False)) - int(target["html"]["structured_data"].get("has_faq_schema", False))
+
+    ps_source = source["tech"]["pagespeed"].get("performance_score")
+    ps_target = target["tech"]["pagespeed"].get("performance_score")
+    ps_delta = None if (ps_source is None or ps_target is None) else (ps_source - ps_target)
+
+    return {
+        "comparison_id": new_id(),
+        "kind": kind,
+        "source_page_id": source["page_id"],
+        "target_page_id": target["page_id"],
+        "diff": {
+            "structure": {
+                "h2_count_delta": h2_delta,
+                "missing_intent_items": missing_intent_items,
+                "faq_schema_delta": faq_delta
+            },
+            "tech": {
+                "performance_score_delta": ps_delta,
+                "mobile_hint_delta": f'{source["tech"]["mobile_friendly_hint"]}->{target["tech"]["mobile_friendly_hint"]}'
+            },
+            "serp": {
+                "title_pattern_notes": extract_title_pattern_notes(source, target),
+                "snippet_pattern_notes": extract_snippet_pattern_notes(source, target)
+            }
+        }
+    }
+
+
+def run_rule_engine(pages, comparisons, cfg, job):
+    """
+    Produces:
+    - scores (A/B/C/D)
+    - cause_breakdown (content/ctr/technical %)
+    - main_cause (content_quality/ctr/technical/mixed)
+    - todos list (<= 15)
+    """
+    official = find_page(pages, "official_homepage")
+
+    scores = compute_scores(pages, cfg)
+    cause = compute_main_cause(official, comparisons, scores, cfg)
+    evidence = build_evidence(official, comparisons, scores, cause, cfg)
+
+    diagnosis = {
+        "main_cause": cause["main_cause"],
+        "cause_breakdown": cause["breakdown"],
+        "scores": scores,
+        "evidence": evidence
+    }
+
+    todos = generate_todos(pages, comparisons, diagnosis, cfg, job)
+    todos = enforce_todo_limits(todos, cfg)
+
+    return diagnosis, todos
+
+
+def build_ai_prompt_payload(pages, comparisons, diagnosis, todos, cfg, job):
+    """
+    Produce compact payload for AI report generation.
+    """
+    summary = build_summary_text(diagnosis, todos)
+    slim_pages = slim_pages_for_ai(pages, cfg)
+    slim_comparisons = slim_comparisons_for_ai(comparisons)
+    slim_todos = slim_todos_for_ai(todos, cfg)
+
+    return {
+        "report_language": cfg["ai"]["language"],
+        "report_style": cfg["ai"]["report_style"],
+        "constraints": {
+            "must_cite_evidence": cfg["ai"]["must_cite_evidence"],
+            "no_guessing": cfg["ai"]["no_guessing"],
+            "max_todos_per_priority": cfg["app"]["max_todos_per_priority"]
+        },
+        "data": {
+            "summary": summary,
+            "pages": slim_pages,
+            "comparisons": slim_comparisons,
+            "diagnosis": diagnosis,
+            "todos": slim_todos
+        }
+    }
+
+
+def generate_report_md(ai_payload, cfg):
+    """
+    Call LLM with prompt template; validate markdown headings; fallback if invalid.
+    """
+    prompt = build_prompt_from_template(ai_payload)
+    md = llm_call(prompt)
+
+    if not validate_report_markdown(md):
+        md = llm_call(build_repair_prompt(ai_payload, md))
+
+    return md
+```
+
+---
+
+## Appendix C — db_schema.sql（MVPテーブル）
+
+> 目的: URL登録、実行ジョブ、ページ解析結果(JSON)、AIレポート(MD)を保存し、後から履歴が見られる。
+> DB: PostgreSQL想定（JSONBを活用）
+
+```sql
+BEGIN;
+
+-- 1) Sites (プロジェクト単位: 例「日本社会人演劇チームSEO」)
+CREATE TABLE IF NOT EXISTS sites (
+  site_id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name               TEXT NOT NULL,
+  owner_user_id      UUID NULL,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 2) Pages (分析対象URL: 公式/競合/紹介記事)
+CREATE TABLE IF NOT EXISTS pages (
+  page_id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  site_id            UUID NOT NULL REFERENCES sites(site_id) ON DELETE CASCADE,
+  url                TEXT NOT NULL,
+  page_type          TEXT NOT NULL CHECK (page_type IN ('official_homepage', 'competitor_page', 'third_party_profile_page')),
+  label              TEXT NULL,              -- 任意: "公式トップ", "競合A", "紹介記事(掲載元X)"
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(site_id, url)
+);
+
+-- 3) Analysis Jobs (1回の実行単位)
+CREATE TABLE IF NOT EXISTS analysis_jobs (
+  job_id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  site_id            UUID NOT NULL REFERENCES sites(site_id) ON DELETE CASCADE,
+
+  -- 実行パラメータ
+  device             TEXT NOT NULL DEFAULT 'mobile' CHECK (device IN ('mobile','desktop')),
+  locale             TEXT NOT NULL DEFAULT 'ja-JP',
+  target_country     TEXT NOT NULL DEFAULT 'JP',
+  enable_pagespeed   BOOLEAN NOT NULL DEFAULT TRUE,
+  enable_gsc         BOOLEAN NOT NULL DEFAULT FALSE,
+  enable_ai_report   BOOLEAN NOT NULL DEFAULT TRUE,
+
+  -- Search Console property等（必要に応じて）
+  gsc_property       TEXT NULL,
+  brand_terms        TEXT[] NULL,
+
+  status             TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','running','done','failed')),
+  error_message      TEXT NULL,
+
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at         TIMESTAMPTZ NULL,
+  finished_at        TIMESTAMPTZ NULL
+);
+
+-- 4) Job Targets (ジョブごとの対象ページ: 公式1 + 競合2 +（任意で紹介記事…）)
+CREATE TABLE IF NOT EXISTS analysis_job_targets (
+  job_id             UUID NOT NULL REFERENCES analysis_jobs(job_id) ON DELETE CASCADE,
+  page_id            UUID NOT NULL REFERENCES pages(page_id) ON DELETE CASCADE,
+  role               TEXT NOT NULL CHECK (role IN ('official','competitor','third_party')),
+  sort_order         INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (job_id, page_id)
+);
+
+-- 5) Analysis Results (analysis_result.json本体)
+CREATE TABLE IF NOT EXISTS analysis_results (
+  result_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  job_id             UUID NOT NULL REFERENCES analysis_jobs(job_id) ON DELETE CASCADE,
+  site_id            UUID NOT NULL REFERENCES sites(site_id) ON DELETE CASCADE,
+
+  schema_version     TEXT NOT NULL,
+  generated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  analysis_json       JSONB NOT NULL,          -- analysis_result.json相当
+  diagnosis_main_cause TEXT NULL,              -- クエリ用に冗長保存（任意）
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_analysis_results_site_time
+  ON analysis_results(site_id, generated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_analysis_results_json_gin
+  ON analysis_results USING GIN (analysis_json);
+
+-- 6) AI Reports (report.md)
+CREATE TABLE IF NOT EXISTS ai_reports (
+  report_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  result_id          UUID NOT NULL REFERENCES analysis_results(result_id) ON DELETE CASCADE,
+  job_id             UUID NOT NULL REFERENCES analysis_jobs(job_id) ON DELETE CASCADE,
+
+  report_markdown    TEXT NOT NULL,
+  model_name         TEXT NULL,
+  prompt_version     TEXT NULL,
+
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 7) Daily Metrics（将来: 日次のGSC結果や順位を蓄積するための器。MVPではoptional）
+CREATE TABLE IF NOT EXISTS daily_metrics (
+  metric_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  page_id            UUID NOT NULL REFERENCES pages(page_id) ON DELETE CASCADE,
+  date              DATE NOT NULL,
+
+  source             TEXT NOT NULL DEFAULT 'gsc' CHECK (source IN ('gsc','serp','manual')),
+  metrics_json       JSONB NOT NULL,   -- impressions/clicks/ctr/positionなど
+
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(page_id, date, source)
+);
+
+COMMIT;
+```
+
+---
+
+## Appendix D — 最小の運用設計（コーディングエージェント向け）
+
+### バッチ実行
+- `analysis_jobs` を `queued` で作成 → workerが拾って `running` → `analysis_results` 作成 → `ai_reports` 作成 → `done`
+
+### Web UI
+- Site作成 → Pages登録（公式/競合/紹介記事）→ "解析実行"ボタンで job作成
+- 最新の `analysis_results` と `ai_reports` を表示
+
+### 将来拡張
+- `daily_metrics` を毎日更新し、時系列（7/28/90日）での改善検証を可能にする
+
+---
+
 ## 次のステップ（必要なら追記）
 コーディングエージェントがそのまま着手できるように:
-- `config/thresholds.yml`（閾値を外出しした設定例）
-- `analysis_pipeline.py` の疑似コード（関数分割）
-- `db_schema.sql`（MVPテーブル）
-まで一気に追記可能。
+- FastAPIのエンドポイント設計（routes）
+- フロントの画面コンポーネント（URL登録〜レポート表示）
+まで追記可能。

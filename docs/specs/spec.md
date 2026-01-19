@@ -2741,7 +2741,481 @@ export function TodoBoard({ todos, onTodoClick }: TodoBoardProps) {
 
 ---
 
+## H-7. MainCauseBadge Component
+
+> main cause を "一瞬で理解できる" バッジに。派手すぎず、洗練。
+
+```tsx
+// components/results/MainCauseBadge.tsx
+import * as React from "react";
+import { cn } from "@/lib/utils/cn";
+import type { MainCause } from "@/lib/api/types";
+
+export interface MainCauseBadgeProps {
+  cause: MainCause;
+  subtle?: boolean;
+}
+
+function causeTone(cause: MainCause) {
+  switch (cause) {
+    case "content_quality":
+      return {
+        label: "CONTENT",
+        fg: "rgba(var(--cyan),0.95)",
+        bg: "rgba(var(--cyan),0.10)",
+        bd: "rgba(var(--cyan),0.20)"
+      };
+    case "ctr":
+      return {
+        label: "CTR",
+        fg: "rgba(var(--violet),0.95)",
+        bg: "rgba(var(--violet),0.10)",
+        bd: "rgba(var(--violet),0.20)"
+      };
+    case "technical":
+      return {
+        label: "TECH",
+        fg: "rgba(var(--amber),0.95)",
+        bg: "rgba(var(--amber),0.10)",
+        bd: "rgba(var(--amber),0.20)"
+      };
+    case "mixed":
+      return {
+        label: "MIXED",
+        fg: "rgba(var(--fg),0.92)",
+        bg: "rgba(var(--panel),0.10)",
+        bd: "rgba(var(--border),0.16)"
+      };
+    default:
+      return {
+        label: "UNKNOWN",
+        fg: "rgba(var(--muted),0.95)",
+        bg: "rgba(var(--panel),0.08)",
+        bd: "rgba(var(--border),0.14)"
+      };
+  }
+}
+
+export function MainCauseBadge({ cause, subtle }: MainCauseBadgeProps) {
+  const t = causeTone(cause);
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-3 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase",
+        subtle && "opacity-90"
+      )}
+      style={{ color: t.fg, background: t.bg, borderColor: t.bd }}
+      title={`Main cause: ${cause}`}
+    >
+      {t.label}
+    </span>
+  );
+}
+```
+
+---
+
+## H-8. ResultHeader Component
+
+> "プロダクト感"が出る要素を全部ここに集約：
+> - main cause badge
+> - score chips（Content/Tech/CTR）
+> - generated_at
+> - actions（Download JSON / Evidence / Regenerate）
+
+```tsx
+// components/results/ResultHeader.tsx
+"use client";
+
+import * as React from "react";
+import type { Diagnosis } from "@/lib/api/types";
+import { GlassCard } from "@/components/layout/GlassCard";
+import { MainCauseBadge } from "@/components/results/MainCauseBadge";
+import { ScoreBadge } from "@/components/results/ScoreBadge";
+import { cn } from "@/lib/utils/cn";
+import { Download, RefreshCw, FileText, ShieldAlert } from "lucide-react";
+
+export interface ResultHeaderProps {
+  generatedAt: string;
+  mainCause: Diagnosis["main_cause"];
+  scores: Diagnosis["scores"];
+
+  onDownloadJson: () => void;
+  onRegenerateReport: () => Promise<void>;
+  onOpenEvidence: () => void;
+
+  reportStatus?: "ready" | "generating" | "failed";
+}
+
+function formatDateTime(iso: string) {
+  // Keep simple for MVP; replace with date-fns if needed
+  const d = new Date(iso);
+  return d.toLocaleString();
+}
+
+function ActionButton({
+  icon,
+  label,
+  onClick,
+  disabled,
+  subtle
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  subtle?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className={cn(
+        "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs",
+        "border-[rgba(var(--border),var(--border-alpha))]",
+        "bg-[rgba(var(--panel),0.06)] backdrop-blur-[12px]",
+        "hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.22),var(--glow-cyan)]",
+        "transition-all duration-200 ease-out",
+        "disabled:opacity-50 disabled:cursor-not-allowed",
+        subtle && "text-muted-foreground"
+      )}
+    >
+      {icon}
+      <span className="font-medium">{label}</span>
+    </button>
+  );
+}
+
+export function ResultHeader({
+  generatedAt,
+  mainCause,
+  scores,
+  onDownloadJson,
+  onRegenerateReport,
+  onOpenEvidence,
+  reportStatus = "ready"
+}: ResultHeaderProps) {
+  const [regenLoading, setRegenLoading] = React.useState(false);
+
+  const regen = async () => {
+    try {
+      setRegenLoading(true);
+      await onRegenerateReport();
+    } finally {
+      setRegenLoading(false);
+    }
+  };
+
+  return (
+    <GlassCard glow="cyan" className="p-5">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        {/* Left: title + meta */}
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-3">
+            <MainCauseBadge cause={mainCause} />
+            <span className="text-sm font-semibold tracking-tight">
+              RESULT / 診断結果
+            </span>
+            <span className="text-xs text-muted-foreground">
+              generated {formatDateTime(generatedAt)}
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <ScoreBadge label="Content" grade={scores.content} />
+            <ScoreBadge label="Technical" grade={scores.technical} />
+            <ScoreBadge label="CTR" grade={scores.ctr} />
+          </div>
+        </div>
+
+        {/* Right: actions */}
+        <div className="flex flex-wrap items-center gap-2">
+          <ActionButton
+            icon={<Download className="h-4 w-4 opacity-80" />}
+            label="Download JSON"
+            onClick={onDownloadJson}
+          />
+          <ActionButton
+            icon={<FileText className="h-4 w-4 opacity-80" />}
+            label="Evidence"
+            onClick={onOpenEvidence}
+            subtle
+          />
+          <ActionButton
+            icon={
+              reportStatus === "failed" ? (
+                <ShieldAlert className="h-4 w-4 opacity-80" />
+              ) : (
+                <RefreshCw className={cn("h-4 w-4 opacity-80", regenLoading && "animate-spin")} />
+              )
+            }
+            label={regenLoading ? "Regenerating..." : "Regenerate report"}
+            onClick={regen}
+            disabled={regenLoading || reportStatus === "generating"}
+          />
+        </div>
+      </div>
+    </GlassCard>
+  );
+}
+```
+
+---
+
+## H-9. Markdown Styles（`styles/markdown.css`）
+
+> "読みやすさ"が命。Markdownはそのままだとダサくなりがちなので、
+> 見出し・コード・引用・表を整えてプロダクト感を出す。
+
+```css
+/* styles/markdown.css */
+.markdown {
+  color: rgba(var(--fg), 0.90);
+  line-height: 1.75;
+  font-size: 14.5px;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  line-height: 1.25;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  margin-top: 1.2em;
+  margin-bottom: 0.6em;
+}
+
+.markdown h1 {
+  font-size: 20px;
+}
+.markdown h2 {
+  font-size: 16.5px;
+}
+.markdown h3 {
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.markdown p {
+  margin: 0.8em 0;
+  color: rgba(var(--fg), 0.88);
+}
+
+.markdown ul,
+.markdown ol {
+  padding-left: 1.2em;
+  margin: 0.8em 0;
+}
+
+.markdown li {
+  margin: 0.35em 0;
+}
+
+/* Inline code */
+.markdown code {
+  font-family: var(--font-mono, ui-monospace), SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.92em;
+  padding: 0.18em 0.35em;
+  border-radius: 8px;
+  background: rgba(var(--panel), 0.10);
+  border: 1px solid rgba(var(--border), 0.12);
+}
+
+/* Code blocks */
+.markdown pre {
+  font-family: var(--font-mono, ui-monospace), SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 13px;
+  padding: 14px 14px;
+  border-radius: 14px;
+  overflow: auto;
+  background: rgba(var(--panel), 0.08);
+  border: 1px solid rgba(var(--border), 0.12);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+}
+
+.markdown pre code {
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
+/* Blockquote */
+.markdown blockquote {
+  margin: 1em 0;
+  padding: 0.9em 1em;
+  border-left: 3px solid rgba(var(--cyan), 0.55);
+  background: rgba(var(--panel), 0.06);
+  border-radius: 12px;
+  color: rgba(var(--fg), 0.82);
+}
+
+/* Tables */
+.markdown table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 1em 0;
+  overflow: hidden;
+  border-radius: 14px;
+  border: 1px solid rgba(var(--border), 0.12);
+  background: rgba(var(--panel), 0.05);
+}
+
+.markdown th,
+.markdown td {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(var(--border), 0.10);
+}
+
+.markdown th {
+  text-align: left;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(var(--fg), 0.75);
+  background: rgba(var(--panel), 0.06);
+}
+
+.markdown tr:last-child td {
+  border-bottom: none;
+}
+
+/* Horizontal rule */
+.markdown hr {
+  border: none;
+  height: 1px;
+  background: rgba(var(--border), 0.12);
+  margin: 1.2em 0;
+}
+
+/* Links inside markdown */
+.markdown a {
+  color: rgba(var(--cyan), 0.92);
+  text-decoration: none;
+}
+.markdown a:hover {
+  text-decoration: underline;
+}
+```
+
+### H-9.1 Import CSS
+
+`app/layout.tsx` または `app/sites/[siteId]/layout.tsx` で：
+
+```tsx
+import "@/styles/markdown.css";
+```
+
+---
+
+## H-10. ReportMarkdown Component
+
+> 余計な装飾なしで"綺麗に読める"を保証。
+> remark-gfm で表や箇条書きを正しくレンダリング。
+
+```tsx
+// components/results/ReportMarkdown.tsx
+"use client";
+
+import * as React from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { GlassCard } from "@/components/layout/GlassCard";
+
+export interface ReportMarkdownProps {
+  markdown: string;
+  title?: string;
+}
+
+export function ReportMarkdown({ markdown, title = "REPORT / レポート" }: ReportMarkdownProps) {
+  return (
+    <GlassCard className="p-5">
+      <div className="mb-3 flex items-center justify-between">
+        <div className="text-sm font-semibold tracking-tight">{title}</div>
+        <div className="text-[10px] text-muted-foreground uppercase tracking-[0.18em]">AI generated</div>
+      </div>
+
+      <div className="markdown">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
+      </div>
+    </GlassCard>
+  );
+}
+```
+
+---
+
+## H-11. ResultView Usage Example
+
+> ResultHeader + TodoBoard + ReportMarkdown を並べる例（client handling部分のみ）
+
+```tsx
+// components/results/ResultView.tsx
+"use client";
+
+import * as React from "react";
+import { ResultHeader } from "@/components/results/ResultHeader";
+import { TodoBoard } from "@/components/results/TodoBoard";
+import { ReportMarkdown } from "@/components/results/ReportMarkdown";
+import { EvidenceDrawer } from "@/components/results/EvidenceDrawer";
+import type { Diagnosis, Todo } from "@/lib/api/types";
+
+export function ResultView({
+  generatedAt,
+  diagnosis,
+  todos,
+  reportMarkdown,
+  onDownloadJson,
+  onRegenerateReport
+}: {
+  generatedAt: string;
+  diagnosis: Diagnosis;
+  todos: Todo[];
+  reportMarkdown: string;
+  onDownloadJson: () => void;
+  onRegenerateReport: () => Promise<void>;
+}) {
+  const [evidenceOpen, setEvidenceOpen] = React.useState(false);
+
+  return (
+    <div className="space-y-6">
+      <ResultHeader
+        generatedAt={generatedAt}
+        mainCause={diagnosis.main_cause}
+        scores={diagnosis.scores}
+        onDownloadJson={onDownloadJson}
+        onRegenerateReport={onRegenerateReport}
+        onOpenEvidence={() => setEvidenceOpen(true)}
+      />
+
+      <div className="grid gap-6 xl:grid-cols-3">
+        <div className="xl:col-span-2">
+          <TodoBoard todos={todos} />
+        </div>
+        <div>
+          <ReportMarkdown markdown={reportMarkdown} />
+        </div>
+      </div>
+
+      <EvidenceDrawer open={evidenceOpen} onOpenChange={setEvidenceOpen} evidence={diagnosis.evidence} />
+    </div>
+  );
+}
+```
+
+---
+
+## H-12. Acceptance Criteria (UI polish)
+
+- [ ] ResultHeader が "バッジ→スコア→アクション" の順で一瞬で理解できる
+- [ ] ReportMarkdown の見出し/コード/引用/表が崩れず、読みやすい
+- [ ] すべてのコンポーネントが dark theme で十分なコントラスト
+- [ ] Hover時の発光は上品（眩しすぎない）
+
+---
+
 ## 次のステップ（必要なら追記）
 さらに追加が有効なコンポーネント:
-- `ResultHeader`: main_cause バッジ + スコアチップ群 + アクションボタン
-- `ReportMarkdown`: AIレポート表示用 styled markdown（見出し、コードブロック、引用）
+- `EvidenceDrawer`: 根拠を気持ちよく見せるスライドパネル
+- `TodoDetailModal`: 例文・h2案・FAQ案を"コピーボタン付き"で表示

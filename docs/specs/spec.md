@@ -2280,8 +2280,468 @@ export default async function ResultDetailPage({ params }: { params: { siteId: s
 
 ---
 
+# Appendix H: UI Implementation — Midnight Neon
+
+## H-1. Global Styles（`styles/globals.css`）
+
+```css
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================
+   Midnight Neon Theme Variables
+   ============================ */
+:root {
+  /* Base colors */
+  --color-bg-base: #0f1729;          /* Deep navy */
+  --color-bg-surface: #1a2744;       /* Card background */
+  --color-bg-elevated: #243351;      /* Hover / elevated */
+
+  /* Accent colors */
+  --color-accent-cyan: #35D4FF;
+  --color-accent-violet: #A78BFA;
+  --color-accent-green: #4ADE80;     /* Success */
+  --color-accent-amber: #FBBF24;     /* Warning */
+  --color-accent-red: #F87171;       /* Error */
+
+  /* Text colors */
+  --color-text-primary: #F1F5F9;     /* slate-100 */
+  --color-text-secondary: #94A3B8;   /* slate-400 */
+  --color-text-muted: #64748B;       /* slate-500 */
+
+  /* Border / Glass */
+  --color-border: rgba(148, 163, 184, 0.15);
+  --color-glass-bg: rgba(26, 39, 68, 0.6);
+  --color-glass-border: rgba(53, 212, 255, 0.2);
+
+  /* Shadows */
+  --shadow-glow-cyan: 0 0 20px rgba(53, 212, 255, 0.15);
+  --shadow-glow-violet: 0 0 20px rgba(167, 139, 250, 0.15);
+
+  /* Fonts */
+  --font-body: "Noto Sans JP", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+}
+
+/* ============================
+   Base Layer
+   ============================ */
+@layer base {
+  body {
+    @apply bg-[var(--color-bg-base)] text-[var(--color-text-primary)];
+    font-family: var(--font-body);
+    font-feature-settings: "palt" 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Monospace for metrics */
+  .font-mono {
+    font-family: var(--font-mono);
+  }
+
+  /* Japanese text optimization */
+  p, li, dd {
+    line-height: 1.8;
+    letter-spacing: 0.02em;
+  }
+
+  h1, h2, h3 {
+    font-feature-settings: "palt" 1;
+    letter-spacing: 0.04em;
+  }
+}
+
+/* ============================
+   Component Layer
+   ============================ */
+@layer components {
+  /* Glass Card */
+  .glass-card {
+    @apply rounded-2xl p-6;
+    background: var(--color-glass-bg);
+    border: 1px solid var(--color-glass-border);
+    backdrop-filter: blur(12px);
+    box-shadow: var(--shadow-glow-cyan);
+  }
+
+  .glass-card:hover {
+    border-color: rgba(53, 212, 255, 0.4);
+    box-shadow: 0 0 30px rgba(53, 212, 255, 0.2);
+  }
+
+  /* Score Badge */
+  .score-badge {
+    @apply inline-flex items-center justify-center rounded-full font-mono font-bold;
+  }
+
+  .score-badge-a {
+    @apply bg-emerald-500/20 text-emerald-400 border border-emerald-500/30;
+  }
+
+  .score-badge-b {
+    @apply bg-cyan-500/20 text-cyan-400 border border-cyan-500/30;
+  }
+
+  .score-badge-c {
+    @apply bg-amber-500/20 text-amber-400 border border-amber-500/30;
+  }
+
+  .score-badge-d {
+    @apply bg-red-500/20 text-red-400 border border-red-500/30;
+  }
+
+  /* Priority Tags */
+  .priority-tag {
+    @apply text-xs font-mono font-bold px-2 py-0.5 rounded;
+  }
+
+  .priority-p0 {
+    @apply bg-red-500/20 text-red-400;
+  }
+
+  .priority-p1 {
+    @apply bg-amber-500/20 text-amber-400;
+  }
+
+  .priority-p2 {
+    @apply bg-slate-500/20 text-slate-400;
+  }
+}
+```
+
+---
+
+## H-2. Utility: `lib/utils.ts`
+
+```typescript
+import { type ClassValue, clsx } from "clsx";
+import { twMerge } from "tailwind-merge";
+
+/**
+ * Merge Tailwind classes with clsx
+ * Handles conflicts and conditional classes
+ */
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+```
+
+---
+
+## H-3. GlassCard Component
+
+```tsx
+// components/layout/GlassCard.tsx
+import { cn } from "@/lib/utils";
+import { ReactNode } from "react";
+
+interface GlassCardProps {
+  children: ReactNode;
+  className?: string;
+  hover?: boolean;
+  glow?: "cyan" | "violet" | "none";
+}
+
+export function GlassCard({
+  children,
+  className,
+  hover = true,
+  glow = "cyan",
+}: GlassCardProps) {
+  return (
+    <div
+      className={cn(
+        "rounded-2xl p-6",
+        "bg-[var(--color-glass-bg)]",
+        "border border-[var(--color-glass-border)]",
+        "backdrop-blur-xl",
+        hover && "transition-all duration-300",
+        hover && "hover:border-cyan-400/40 hover:shadow-[0_0_30px_rgba(53,212,255,0.2)]",
+        glow === "cyan" && "shadow-[var(--shadow-glow-cyan)]",
+        glow === "violet" && "shadow-[var(--shadow-glow-violet)]",
+        className
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+```
+
+---
+
+## H-4. ScoreBadge Component
+
+```tsx
+// components/results/ScoreBadge.tsx
+import { cn } from "@/lib/utils";
+import type { ScoreGrade } from "@/types/analysis";
+
+interface ScoreBadgeProps {
+  grade: ScoreGrade;
+  label?: string;
+  size?: "sm" | "md" | "lg";
+  showLabel?: boolean;
+}
+
+const gradeStyles: Record<ScoreGrade, string> = {
+  A: "bg-emerald-500/20 text-emerald-400 border-emerald-500/30",
+  B: "bg-cyan-500/20 text-cyan-400 border-cyan-500/30",
+  C: "bg-amber-500/20 text-amber-400 border-amber-500/30",
+  D: "bg-red-500/20 text-red-400 border-red-500/30",
+};
+
+const sizeStyles = {
+  sm: "w-8 h-8 text-sm",
+  md: "w-12 h-12 text-lg",
+  lg: "w-16 h-16 text-2xl",
+};
+
+export function ScoreBadge({
+  grade,
+  label,
+  size = "md",
+  showLabel = false,
+}: ScoreBadgeProps) {
+  return (
+    <div className="flex flex-col items-center gap-1">
+      <div
+        className={cn(
+          "inline-flex items-center justify-center",
+          "rounded-full border font-mono font-bold",
+          "transition-transform hover:scale-105",
+          gradeStyles[grade],
+          sizeStyles[size]
+        )}
+      >
+        {grade}
+      </div>
+      {showLabel && label && (
+        <span className="text-xs text-[var(--color-text-secondary)]">
+          {label}
+        </span>
+      )}
+    </div>
+  );
+}
+```
+
+---
+
+## H-5. TodoCard Component
+
+```tsx
+// components/results/TodoCard.tsx
+import { cn } from "@/lib/utils";
+import type { Todo } from "@/types/analysis";
+import { GlassCard } from "@/components/layout/GlassCard";
+import {
+  Zap,           // high impact
+  TrendingUp,    // medium impact
+  Minus,         // low impact
+  Clock,         // effort indicator
+} from "lucide-react";
+
+interface TodoCardProps {
+  todo: Todo;
+  onClick?: () => void;
+}
+
+const priorityStyles = {
+  P0: "border-l-red-500 bg-red-500/5",
+  P1: "border-l-amber-500 bg-amber-500/5",
+  P2: "border-l-slate-500 bg-slate-500/5",
+};
+
+const priorityLabels = {
+  P0: { text: "今すぐ", color: "text-red-400" },
+  P1: { text: "1-2週", color: "text-amber-400" },
+  P2: { text: "中長期", color: "text-slate-400" },
+};
+
+const impactIcons = {
+  high: <Zap className="w-4 h-4 text-amber-400" />,
+  medium: <TrendingUp className="w-4 h-4 text-cyan-400" />,
+  low: <Minus className="w-4 h-4 text-slate-400" />,
+};
+
+const effortLabels = {
+  small: "軽",
+  medium: "中",
+  large: "重",
+};
+
+export function TodoCard({ todo, onClick }: TodoCardProps) {
+  const { priority, title, details, impact, effort, evidence } = todo;
+
+  return (
+    <div
+      onClick={onClick}
+      className={cn(
+        "rounded-lg p-4 border-l-4 cursor-pointer",
+        "bg-[var(--color-bg-surface)]",
+        "border border-[var(--color-border)]",
+        "transition-all duration-200",
+        "hover:bg-[var(--color-bg-elevated)]",
+        "hover:translate-x-1",
+        priorityStyles[priority]
+      )}
+    >
+      {/* Header */}
+      <div className="flex items-start justify-between gap-2 mb-2">
+        <h4 className="font-medium text-[var(--color-text-primary)] line-clamp-2">
+          {title}
+        </h4>
+        <span
+          className={cn(
+            "text-xs font-mono font-bold px-2 py-0.5 rounded shrink-0",
+            priority === "P0" && "bg-red-500/20 text-red-400",
+            priority === "P1" && "bg-amber-500/20 text-amber-400",
+            priority === "P2" && "bg-slate-500/20 text-slate-400"
+          )}
+        >
+          {priority}
+        </span>
+      </div>
+
+      {/* Details */}
+      <p className="text-sm text-[var(--color-text-secondary)] line-clamp-2 mb-3">
+        {details}
+      </p>
+
+      {/* Footer: Impact & Effort */}
+      <div className="flex items-center gap-4 text-xs">
+        <div className="flex items-center gap-1">
+          {impactIcons[impact]}
+          <span className="text-[var(--color-text-muted)]">効果</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <Clock className="w-3 h-3 text-[var(--color-text-muted)]" />
+          <span className="text-[var(--color-text-muted)]">
+            {effortLabels[effort]}
+          </span>
+        </div>
+      </div>
+
+      {/* Evidence (collapsed) */}
+      {evidence.length > 0 && (
+        <div className="mt-2 pt-2 border-t border-[var(--color-border)]">
+          <span className="text-xs text-[var(--color-text-muted)]">
+            根拠: {evidence.length}件
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+---
+
+## H-6. TodoBoard Component（P0 / P1 / P2 カラム）
+
+```tsx
+// components/results/TodoBoard.tsx
+import { cn } from "@/lib/utils";
+import type { Todo, TodoPriority } from "@/types/analysis";
+import { TodoCard } from "./TodoCard";
+import { GlassCard } from "@/components/layout/GlassCard";
+import { AlertTriangle, Clock, Calendar } from "lucide-react";
+
+interface TodoBoardProps {
+  todos: Todo[];
+  onTodoClick?: (todo: Todo) => void;
+}
+
+interface ColumnConfig {
+  priority: TodoPriority;
+  label: string;
+  sublabel: string;
+  icon: React.ReactNode;
+  headerColor: string;
+}
+
+const columns: ColumnConfig[] = [
+  {
+    priority: "P0",
+    label: "今すぐ対応",
+    sublabel: "Critical",
+    icon: <AlertTriangle className="w-4 h-4" />,
+    headerColor: "text-red-400",
+  },
+  {
+    priority: "P1",
+    label: "1-2週間以内",
+    sublabel: "Important",
+    icon: <Clock className="w-4 h-4" />,
+    headerColor: "text-amber-400",
+  },
+  {
+    priority: "P2",
+    label: "中長期",
+    sublabel: "Nice to have",
+    icon: <Calendar className="w-4 h-4" />,
+    headerColor: "text-slate-400",
+  },
+];
+
+export function TodoBoard({ todos, onTodoClick }: TodoBoardProps) {
+  const groupedTodos = {
+    P0: todos.filter((t) => t.priority === "P0"),
+    P1: todos.filter((t) => t.priority === "P1"),
+    P2: todos.filter((t) => t.priority === "P2"),
+  };
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      {columns.map((col) => (
+        <div key={col.priority} className="flex flex-col">
+          {/* Column Header */}
+          <div
+            className={cn(
+              "flex items-center gap-2 mb-3 pb-2",
+              "border-b border-[var(--color-border)]"
+            )}
+          >
+            <span className={col.headerColor}>{col.icon}</span>
+            <div>
+              <h3 className={cn("font-bold", col.headerColor)}>
+                {col.label}
+              </h3>
+              <span className="text-xs text-[var(--color-text-muted)]">
+                {col.sublabel} ({groupedTodos[col.priority].length})
+              </span>
+            </div>
+          </div>
+
+          {/* Cards */}
+          <div className="flex flex-col gap-3">
+            {groupedTodos[col.priority].length === 0 ? (
+              <div className="text-center py-8 text-[var(--color-text-muted)] text-sm">
+                該当なし
+              </div>
+            ) : (
+              groupedTodos[col.priority].map((todo) => (
+                <TodoCard
+                  key={todo.todo_id}
+                  todo={todo}
+                  onClick={() => onTodoClick?.(todo)}
+                />
+              ))
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+```
+
+---
+
 ## 次のステップ（必要なら追記）
-UIの"カッコよさ"が一気に上がるおすすめ追記:
-- `globals.css` のテーマCSS変数（Midnight Neon）具体値
-- `<GlassCard />` と `<ScoreBadge />` の見た目の決め打ち実装
-- 結果ページの ToDoボード（P0/P1/P2）実装（ドラッグはMVP後でもOK）
+さらに追加が有効なコンポーネント:
+- `ResultHeader`: main_cause バッジ + スコアチップ群 + アクションボタン
+- `ReportMarkdown`: AIレポート表示用 styled markdown（見出し、コードブロック、引用）

@@ -6318,8 +6318,781 @@ const [editOpen, setEditOpen] = useState(false);
 
 ---
 
+# Appendix P: SiteCreateWizard (新規サイト作成ウィザード)
+
+**Scope**:
+- サイト新規作成の "最初の体験" をウィザード化
+- 事故防止：入力漏れ/不正URL/導線不足を減らす
+- MVP: 3 steps
+  1) Site info（名前/説明）
+  2) Pages seed（公式URL + 競合2 + 任意の紹介ページ）
+  3) Review & Create（作成→Runへ誘導）
+
+**Target**:
+- Next.js App Router
+- Tailwind
+- lucide-react
+- 既存UI: GlassCard / Midnight Neon
+- API: createSite, createPages (bulk) もしくは createPage を複数回
+
+---
+
+## P-0. 前提API（MVPで必要）
+
+### P-0.1 Required endpoints
+- `POST /sites` → site作成
+- `POST /sites/{site_id}/pages:bulk`（推奨） or `POST /sites/{site_id}/pages` を複数回
+- (optional) `GET /sites/{site_id}`
+
+### P-0.2 Types (lib/api/types.ts)
+
+```ts
+export type PageType = "official_homepage" | "competitor_page" | "third_party_profile_page";
+export type DeviceType = "mobile" | "desktop";
+
+export interface Site {
+  site_id: UUID;
+  name: string;
+  description?: string | null;
+  created_at: string;
+}
+
+export interface CreateSiteInput {
+  name: string;
+  description?: string | null;
+}
+
+export interface CreatePageInput {
+  url: string;
+  label?: string | null;
+  page_type: PageType;
+}
+
+export interface CreatePagesBulkInput {
+  pages: CreatePageInput[];
+}
+```
+
+### P-0.3 Queries (lib/api/queries.ts)
+
+```ts
+import type { Site, CreateSiteInput, CreatePagesBulkInput, Page } from "./types";
+import { apiFetch } from "./client";
+import { routes } from "./routes";
+import type { UUID } from "./types";
+
+export async function createSite(input: CreateSiteInput): Promise<Site> {
+  return apiFetch(routes.sites(), { method: "POST", body: JSON.stringify(input) });
+}
+
+// Recommended bulk
+export async function createPagesBulk(siteId: UUID, input: CreatePagesBulkInput): Promise<{ items: Page[] }> {
+  return apiFetch(routes.pagesBulk(siteId), { method: "POST", body: JSON.stringify(input) });
+}
+
+// Fallback: single
+export async function createPage(siteId: UUID, input: any): Promise<Page> {
+  return apiFetch(routes.pages(siteId), { method: "POST", body: JSON.stringify(input) });
+}
+```
+
+### P-0.4 Routes (lib/api/routes.ts)
+
+```ts
+export const routes = {
+  sites: () => `/sites`,
+  pages: (siteId: UUID) => `/sites/${siteId}/pages`,
+  pagesBulk: (siteId: UUID) => `/sites/${siteId}/pages:bulk`,
+};
+```
+
+---
+
+## P-1. Wizard UX 仕様
+
+### P-1.1 Steps
+- **Step 1: Site Info**
+  - name (required)
+  - description (optional)
+- **Step 2: Seed Pages**
+  - official_url (required, 1)
+  - competitor_urls (required, 2)
+  - third_party_urls (optional, 0..5)
+- **Step 3: Review & Create**
+  - 入力内容の確認
+  - Create実行
+  - 完了後「Run画面へ」導線（/sites/{siteId}/run）
+
+### P-1.2 Validation Rules (MVP)
+- URLは http:// or https:// で始まる
+- competitor_urls は ちょうど2件
+- official_url は competitor と重複不可
+- 同一URL重複禁止
+- third_party_urls は空行を許可（入力中のUX）
+
+---
+
+## P-2. Props 定義
+
+```ts
+// components/sites/SiteCreateWizard.types.ts
+export interface SiteCreateWizardProps {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+
+  /** create完了時 */
+  onCreated?: (siteId: string) => void;
+
+  /** create後にrunへ飛ばす場合 */
+  navigateToRun?: boolean;
+}
+```
+
+---
+
+## P-3. Helper: URL validation / normalize
+
+```ts
+// lib/utils/url.ts
+export function normalizeUrl(raw: string) {
+  return raw.trim();
+}
+
+export function isValidHttpUrl(raw: string) {
+  const s = raw.trim();
+  if (!/^https?:\/\//i.test(s)) return false;
+  try {
+    new URL(s);
+    return true;
+  } catch {
+    return false;
+  }
+}
+```
+
+---
+
+## P-4. UI コンポーネント
+
+### P-4.1 WizardStepper
+
+```tsx
+// components/sites/WizardStepper.tsx
+import * as React from "react";
+import { cn } from "@/lib/utils/cn";
+import { Check } from "lucide-react";
+
+export interface WizardStepperProps {
+  step: number; // 1..3
+}
+
+export function WizardStepper({ step }: WizardStepperProps) {
+  const steps = [
+    { n: 1, label: "Site Info" },
+    { n: 2, label: "Seed Pages" },
+    { n: 3, label: "Review" },
+  ];
+
+  return (
+    <div className="grid grid-cols-3 gap-2">
+      {steps.map((s) => {
+        const done = step > s.n;
+        const active = step === s.n;
+
+        return (
+          <div
+            key={s.n}
+            className={cn(
+              "rounded-[var(--r-md)] border px-3 py-2 bg-[rgba(var(--panel),0.06)]",
+              "border-[rgba(var(--border),0.12)]",
+              active && "shadow-[0_0_0_1px_rgba(var(--cyan),0.22),var(--glow-cyan)]"
+            )}
+          >
+            <div className="flex items-center justify-between">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+                Step {s.n}
+              </div>
+              {done ? (
+                <span className="inline-flex items-center gap-1 text-[10px]"
+                      style={{ color: "rgba(var(--lime),0.95)" }}>
+                  <Check className="h-3 w-3" /> OK
+                </span>
+              ) : null}
+            </div>
+            <div className="text-xs font-semibold">{s.label}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+```
+
+### P-4.2 UrlRowsInput
+
+複数URL入力用。空行を許可しつつ、正規化・削除もできる。
+
+```tsx
+// components/sites/UrlRowsInput.tsx
+"use client";
+
+import * as React from "react";
+import { cn } from "@/lib/utils/cn";
+import { Plus, X } from "lucide-react";
+import { isValidHttpUrl, normalizeUrl } from "@/lib/utils/url";
+
+export interface UrlRowsInputProps {
+  label: string;
+  hint?: string;
+  rows: string[];
+  onChange: (rows: string[]) => void;
+  requiredCount?: number;     // if set, show count hint
+  maxCount?: number;          // optional
+  allowEmptyRows?: boolean;   // default true
+}
+
+export function UrlRowsInput({
+  label,
+  hint,
+  rows,
+  onChange,
+  requiredCount,
+  maxCount = 8,
+  allowEmptyRows = true
+}: UrlRowsInputProps) {
+  const setRow = (idx: number, v: string) => {
+    const next = [...rows];
+    next[idx] = v;
+    onChange(next);
+  };
+
+  const addRow = () => {
+    if (rows.length >= maxCount) return;
+    onChange([...rows, ""]);
+  };
+
+  const removeRow = (idx: number) => {
+    const next = rows.filter((_, i) => i !== idx);
+    onChange(next.length === 0 ? [""] : next);
+  };
+
+  const normalizeAll = () => {
+    const next = rows.map((r) => normalizeUrl(r));
+    onChange(next);
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-baseline justify-between">
+        <div className="text-xs font-semibold text-muted-foreground">{label}</div>
+        {requiredCount != null ? (
+          <div className="text-[10px] text-muted-foreground uppercase tracking-[0.18em]">
+            {rows.filter((r) => r.trim()).length}/{requiredCount}
+          </div>
+        ) : null}
+      </div>
+
+      <div className="space-y-2">
+        {rows.map((r, idx) => {
+          const trimmed = r.trim();
+          const showErr = trimmed.length > 0 && !isValidHttpUrl(trimmed);
+
+          return (
+            <div key={idx} className="flex items-center gap-2">
+              <input
+                value={r}
+                onChange={(e) => setRow(idx, e.target.value)}
+                onBlur={normalizeAll}
+                placeholder="https://example.com/..."
+                className={cn(
+                  "w-full rounded-[var(--r-md)] border px-3 py-2 text-sm outline-none",
+                  "bg-[rgba(var(--panel),0.06)] border-[rgba(var(--border),0.12)]",
+                  showErr && "border-[rgba(var(--rose),0.35)]"
+                )}
+              />
+              <button
+                type="button"
+                onClick={() => removeRow(idx)}
+                className="rounded-full border px-3 py-2 text-xs
+                           border-[rgba(var(--border),0.14)] bg-[rgba(var(--panel),0.06)]
+                           hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.18)] transition"
+                title="削除"
+              >
+                <X className="h-4 w-4 opacity-75" />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={addRow}
+          disabled={rows.length >= maxCount}
+          className="inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs
+                     border-[rgba(var(--cyan),0.20)] bg-[rgba(var(--cyan),0.08)]
+                     hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.22),var(--glow-cyan)] transition
+                     disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <Plus className="h-4 w-4 opacity-80" />
+          Add row
+        </button>
+
+        {hint ? (
+          <div className="text-[11px] text-muted-foreground-2">{hint}</div>
+        ) : null}
+      </div>
+
+      {allowEmptyRows ? (
+        <div className="text-[11px] text-muted-foreground-2">
+          ※ 空行は無視されます（入力途中OK）
+        </div>
+      ) : null}
+    </div>
+  );
+}
+```
+
+---
+
+## P-5. SiteCreateWizard 実装
+
+```tsx
+// components/sites/SiteCreateWizard.tsx
+"use client";
+
+import * as React from "react";
+import type { SiteCreateWizardProps } from "./SiteCreateWizard.types";
+import { GlassCard } from "@/components/layout/GlassCard";
+import { WizardStepper } from "@/components/sites/WizardStepper";
+import { UrlRowsInput } from "@/components/sites/UrlRowsInput";
+import { cn } from "@/lib/utils/cn";
+import { isValidHttpUrl, normalizeUrl } from "@/lib/utils/url";
+import { createSite, createPagesBulk, createPage } from "@/lib/api/queries";
+import { useRouter } from "next/navigation";
+import { X, ArrowRight, Sparkles, AlertTriangle } from "lucide-react";
+import type { CreatePageInput, PageType } from "@/lib/api/types";
+
+type Step = 1 | 2 | 3;
+
+function uniqueNonEmpty(urls: string[]) {
+  const set = new Set<string>();
+  for (const u of urls.map(normalizeUrl)) {
+    if (!u) continue;
+    set.add(u);
+  }
+  return [...set];
+}
+
+function buildPagesPayload(args: {
+  officialUrl: string;
+  competitorUrls: string[];
+  thirdPartyUrls: string[];
+}): CreatePageInput[] {
+  const pages: CreatePageInput[] = [];
+
+  pages.push({
+    url: args.officialUrl,
+    page_type: "official_homepage",
+    label: "Official"
+  });
+
+  args.competitorUrls.forEach((u, i) => {
+    pages.push({
+      url: u,
+      page_type: "competitor_page",
+      label: `Competitor ${i + 1}`
+    });
+  });
+
+  args.thirdPartyUrls.forEach((u, i) => {
+    pages.push({
+      url: u,
+      page_type: "third_party_profile_page",
+      label: `Third-party ${i + 1}`
+    });
+  });
+
+  return pages;
+}
+
+export function SiteCreateWizard({ open, onOpenChange, onCreated, navigateToRun = true }: SiteCreateWizardProps) {
+  const router = useRouter();
+
+  const [step, setStep] = React.useState<Step>(1);
+
+  // Step1
+  const [name, setName] = React.useState("");
+  const [description, setDescription] = React.useState("");
+
+  // Step2
+  const [officialRows, setOfficialRows] = React.useState<string[]>([""]);
+  const [competitorRows, setCompetitorRows] = React.useState<string[]>(["", ""]);
+  const [thirdPartyRows, setThirdPartyRows] = React.useState<string[]>([""]);
+
+  // Errors
+  const [error, setError] = React.useState<string | null>(null);
+
+  // Create state
+  const [creating, setCreating] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!open) return;
+    // reset when opened
+    setStep(1);
+    setName("");
+    setDescription("");
+    setOfficialRows([""]);
+    setCompetitorRows(["", ""]);
+    setThirdPartyRows([""]);
+    setError(null);
+    setCreating(false);
+  }, [open]);
+
+  if (!open) return null;
+
+  const officialUrl = uniqueNonEmpty(officialRows)[0] ?? "";
+  const competitorUrls = uniqueNonEmpty(competitorRows).slice(0, 2);
+  const thirdPartyUrls = uniqueNonEmpty(thirdPartyRows).slice(0, 5);
+
+  const validateStep1 = () => {
+    if (!name.trim()) return "サイト名を入力してください";
+    return null;
+  };
+
+  const validateStep2 = () => {
+    if (!officialUrl) return "公式URLを入力してください";
+    if (!isValidHttpUrl(officialUrl)) return "公式URLが正しくありません（http/https）";
+    if (competitorUrls.length !== 2) return "競合URLは2件入力してください";
+    if (competitorUrls.some((u) => !isValidHttpUrl(u))) return "競合URLが正しくありません（http/https）";
+    if (new Set([officialUrl, ...competitorUrls, ...thirdPartyUrls]).size !== 1 + competitorUrls.length + thirdPartyUrls.length)
+      return "同一URLが重複しています（公式/競合/紹介の重複を解消してください）";
+    if (competitorUrls.includes(officialUrl)) return "公式URLと競合URLが重複しています";
+    return null;
+  };
+
+  const close = () => {
+    if (creating) return;
+    onOpenChange(false);
+  };
+
+  const next = () => {
+    setError(null);
+    if (step === 1) {
+      const e = validateStep1();
+      if (e) return setError(e);
+      setStep(2);
+      return;
+    }
+    if (step === 2) {
+      const e = validateStep2();
+      if (e) return setError(e);
+      setStep(3);
+      return;
+    }
+  };
+
+  const back = () => {
+    setError(null);
+    if (step === 2) setStep(1);
+    if (step === 3) setStep(2);
+  };
+
+  const onCreate = async () => {
+    setError(null);
+    const e1 = validateStep1();
+    if (e1) return setError(e1);
+    const e2 = validateStep2();
+    if (e2) return setError(e2);
+
+    setCreating(true);
+    try {
+      // 1) create site
+      const site = await createSite({
+        name: name.trim(),
+        description: description.trim() ? description.trim() : null
+      });
+
+      // 2) create pages
+      const pages = buildPagesPayload({ officialUrl, competitorUrls, thirdPartyUrls });
+
+      // Preferred: bulk
+      try {
+        await createPagesBulk(site.site_id, { pages });
+      } catch {
+        // Fallback: single calls
+        for (const p of pages) {
+          await createPage(site.site_id, p);
+        }
+      }
+
+      onCreated?.(site.site_id);
+
+      // 3) navigate
+      onOpenChange(false);
+      if (navigateToRun) router.push(`/sites/${site.site_id}/run`);
+      else router.push(`/sites/${site.site_id}`);
+    } catch (err: any) {
+      setError(err?.message ?? "作成に失敗しました");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const canCreate = !validateStep1() && !validateStep2();
+
+  return (
+    <div className="fixed inset-0 z-50">
+      {/* overlay */}
+      <div className="absolute inset-0 bg-black/60" onClick={close} />
+
+      {/* modal */}
+      <div className="absolute left-1/2 top-1/2 w-[min(760px,calc(100%-24px))] -translate-x-1/2 -translate-y-1/2 p-2">
+        <GlassCard className="p-6">
+          {/* Header */}
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-5 w-5 opacity-80" />
+                <div className="text-sm font-semibold tracking-tight">
+                  CREATE SITE / サイト作成ウィザード
+                </div>
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                公式1・競合2を登録して、すぐ診断を開始できます
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={close}
+              className="rounded-full border px-3 py-2 text-xs
+                         border-[rgba(var(--border),0.14)] bg-[rgba(var(--panel),0.06)]
+                         hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.18)] transition"
+              disabled={creating}
+            >
+              <X className="h-4 w-4 opacity-80" />
+            </button>
+          </div>
+
+          {/* Stepper */}
+          <div className="mt-5">
+            <WizardStepper step={step} />
+          </div>
+
+          {/* Body */}
+          <div className="mt-6 space-y-5">
+            {step === 1 ? (
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <div className="text-xs font-semibold text-muted-foreground">SITE NAME *</div>
+                  <input
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="例：〇〇劇団 公式"
+                    className="w-full rounded-[var(--r-md)] border px-3 py-2 text-sm outline-none
+                               bg-[rgba(var(--panel),0.06)] border-[rgba(var(--border),0.12)]
+                               placeholder:text-[rgba(var(--fg),0.45)]"
+                  />
+                  <div className="text-[11px] text-muted-foreground-2">
+                    管理用の名称です（検索クエリではありません）
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="text-xs font-semibold text-muted-foreground">DESCRIPTION（任意）</div>
+                  <textarea
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    placeholder="例：社会人演劇・東京中心。月1稽古。"
+                    className="min-h-[92px] w-full rounded-[var(--r-md)] border px-3 py-2 text-sm outline-none
+                               bg-[rgba(var(--panel),0.06)] border-[rgba(var(--border),0.12)]
+                               placeholder:text-[rgba(var(--fg),0.45)]"
+                  />
+                  <div className="text-[11px] text-muted-foreground-2">
+                    レポートの文脈補助に使えます
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {step === 2 ? (
+              <div className="space-y-5">
+                <UrlRowsInput
+                  label="OFFICIAL URL *（公式サイト）"
+                  hint="例：https://your-site.com"
+                  rows={officialRows}
+                  onChange={setOfficialRows}
+                  requiredCount={1}
+                  maxCount={1}
+                />
+
+                <UrlRowsInput
+                  label="COMPETITOR URLS *（競合：2件）"
+                  hint="競合は2件入力（MVP要件）"
+                  rows={competitorRows}
+                  onChange={setCompetitorRows}
+                  requiredCount={2}
+                  maxCount={2}
+                  allowEmptyRows={false}
+                />
+
+                <UrlRowsInput
+                  label="THIRD-PARTY URLS（紹介/掲載ページ：任意）"
+                  hint="紹介サイト内の自分たちの掲載ページURL（0〜5件）"
+                  rows={thirdPartyRows}
+                  onChange={setThirdPartyRows}
+                  maxCount={5}
+                />
+              </div>
+            ) : null}
+
+            {step === 3 ? (
+              <div className="space-y-4">
+                <div className="rounded-[var(--r-lg)] border p-4 bg-[rgba(var(--panel),0.06)] border-[rgba(var(--border),0.12)]">
+                  <div className="text-xs font-semibold text-muted-foreground">REVIEW</div>
+                  <div className="mt-2 grid gap-3 md:grid-cols-2">
+                    <div>
+                      <div className="text-xs font-semibold">Site name</div>
+                      <div className="text-sm text-muted-foreground">{name.trim() || "—"}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs font-semibold">Description</div>
+                      <div className="text-sm text-muted-foreground">{description.trim() || "—"}</div>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 grid gap-3">
+                    <div>
+                      <div className="text-xs font-semibold">Official</div>
+                      <div className="text-sm text-muted-foreground break-all">{officialUrl || "—"}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs font-semibold">Competitors</div>
+                      <ul className="mt-1 space-y-1">
+                        {competitorUrls.map((u, i) => (
+                          <li key={i} className="text-sm text-muted-foreground break-all">• {u}</li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div>
+                      <div className="text-xs font-semibold">Third-party</div>
+                      {thirdPartyUrls.length ? (
+                        <ul className="mt-1 space-y-1">
+                          {thirdPartyUrls.map((u, i) => (
+                            <li key={i} className="text-sm text-muted-foreground break-all">• {u}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="text-sm text-muted-foreground">—</div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="mt-4 text-[11px] text-muted-foreground-2">
+                    作成後、自動でRun画面に移動します（設定はRun画面で調整可能）
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {/* Error */}
+            {error ? (
+              <div className="rounded-[var(--r-md)] border p-3 text-xs"
+                   style={{ borderColor: "rgba(var(--rose),0.22)", background: "rgba(var(--rose),0.08)" }}>
+                <div className="flex items-center gap-2 font-semibold" style={{ color: "rgba(var(--rose),0.95)" }}>
+                  <AlertTriangle className="h-4 w-4" />
+                  Error
+                </div>
+                <div className="mt-1 text-muted-foreground">{error}</div>
+              </div>
+            ) : null}
+          </div>
+
+          {/* Footer actions */}
+          <div className="mt-6 flex items-center justify-between">
+            <button
+              type="button"
+              onClick={back}
+              disabled={step === 1 || creating}
+              className="rounded-full border px-4 py-2 text-xs
+                         border-[rgba(var(--border),0.14)] bg-[rgba(var(--panel),0.06)]
+                         hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.18)] transition
+                         disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Back
+            </button>
+
+            <div className="flex items-center gap-2">
+              {step < 3 ? (
+                <button
+                  type="button"
+                  onClick={next}
+                  disabled={creating}
+                  className="inline-flex items-center gap-2 rounded-full border px-4 py-2 text-xs font-semibold
+                             border-[rgba(var(--cyan),0.22)] bg-[rgba(var(--cyan),0.10)]
+                             hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.25),var(--glow-cyan)] transition
+                             disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Next <ArrowRight className="h-4 w-4 opacity-80" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={onCreate}
+                  disabled={creating || !canCreate}
+                  className="inline-flex items-center gap-2 rounded-full border px-5 py-2 text-xs font-semibold
+                             border-[rgba(var(--violet),0.22)] bg-[rgba(var(--violet),0.10)]
+                             hover:shadow-[0_0_0_1px_rgba(var(--violet),0.22),var(--glow-violet)] transition
+                             disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {creating ? "Creating…" : "Create & Run"}
+                </button>
+              )}
+            </div>
+          </div>
+        </GlassCard>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## P-6. 呼び出し例
+
+```tsx
+// app/sites/page.tsx or header button
+const [open, setOpen] = useState(false);
+
+<button onClick={() => setOpen(true)}>New Site</button>
+
+<SiteCreateWizard
+  open={open}
+  onOpenChange={setOpen}
+  navigateToRun={true}
+  onCreated={(siteId) => {
+    // optional: refresh sites list
+  }}
+/>
+```
+
+---
+
+## P-7. Acceptance Criteria
+
+- [ ] Step 1: name必須、description任意
+- [ ] Step 2: 公式1、競合2必須、紹介0..5任意
+- [ ] URLのhttp/httpsチェック、重複防止
+- [ ] Step 3: Reviewで確認して作成
+- [ ] 作成成功後 /sites/{site_id}/run に遷移
+- [ ] bulkが無い場合でも createPage のループで動作
+
+---
+
 ## 次のステップ（必要なら追記）
 さらに追加が有効なコンポーネント:
-- `SiteCreateWizard`: サイト新規作成ウィザード
-- `PageCreateFlow`: URL登録体験の改善
+- `PageCreateFlow`: URL登録体験の改善（page_type推定、duplicate check）
 - `EmptyStates`: 空状態・エラー状態のガイド

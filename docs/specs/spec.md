@@ -5974,8 +5974,352 @@ import { RUN_PRESETS } from "@/lib/run/presets";
 
 ---
 
+# Appendix O: PageEditModal (URL編集 / 削除)
+
+**Scope**:
+- ページURLの編集・ラベル変更・ページタイプ変更
+- 削除（確認付き）
+- 運用事故防止（dirty state / confirm）
+- API接続（PATCH / DELETE）
+
+**Target**:
+- Next.js App Router
+- Tailwind
+- lucide-react
+- shadcn/ui Dialog（※未使用でも動く設計）
+
+---
+
+## O-0. 位置づけ（重要）
+
+PageEditModal は **P0必須UI**。
+
+- URL登録ミス
+- 競合URLの差し替え
+- ラベル修正
+- 不要ページの削除
+
+これが無いと **DB直編集 or 作り直し** が発生するため、MVPでも必ず入れる。
+
+---
+
+## O-1. Props 定義
+
+```ts
+// components/pages/PageEditModal.types.ts
+import type { Page, PageType, UUID } from "@/lib/api/types";
+
+export interface PageEditModalProps {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+
+  page: Page | null;
+
+  onSaved?: (page: Page) => void;
+  onDeleted?: (pageId: UUID) => void;
+}
+```
+
+---
+
+## O-2. API 接続（既存APIの利用）
+
+**利用する既存エンドポイント**:
+- `PATCH /sites/{site_id}/pages/{page_id}`
+- `DELETE /sites/{site_id}/pages/{page_id}`
+
+※ `lib/api/queries.ts` に既に以下がある前提:
+
+```ts
+updatePage(siteId, pageId, input)
+deletePage(siteId, pageId)
+```
+
+---
+
+## O-3. UI 実装
+
+```tsx
+// components/pages/PageEditModal.tsx
+"use client";
+
+import * as React from "react";
+import type { PageEditModalProps } from "./PageEditModal.types";
+import { updatePage, deletePage } from "@/lib/api/queries";
+import { GlassCard } from "@/components/layout/GlassCard";
+import { cn } from "@/lib/utils/cn";
+import { X, Trash2, Save, AlertTriangle } from "lucide-react";
+
+const PAGE_TYPES = [
+  { value: "official_homepage", label: "公式ホームページ" },
+  { value: "competitor_page", label: "競合ページ" },
+  { value: "third_party_profile_page", label: "紹介・掲載ページ" }
+] as const;
+
+export function PageEditModal({
+  open,
+  onOpenChange,
+  page,
+  onSaved,
+  onDeleted
+}: PageEditModalProps) {
+  const [url, setUrl] = React.useState("");
+  const [label, setLabel] = React.useState("");
+  const [pageType, setPageType] = React.useState<PageEditModalProps["page"] extends infer P ? any : any>();
+  const [saving, setSaving] = React.useState(false);
+  const [deleting, setDeleting] = React.useState(false);
+  const [confirmDelete, setConfirmDelete] = React.useState(false);
+
+  const [dirty, setDirty] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!page) return;
+    setUrl(page.url);
+    setLabel(page.label ?? "");
+    setPageType(page.page_type);
+    setDirty(false);
+    setConfirmDelete(false);
+  }, [page, open]);
+
+  if (!open || !page) return null;
+
+  const canSave =
+    dirty &&
+    url.trim().length > 0 &&
+    pageType;
+
+  const onClose = () => {
+    if (dirty && !confirmDelete) {
+      const ok = window.confirm("変更が保存されていません。閉じてもよいですか？");
+      if (!ok) return;
+    }
+    onOpenChange(false);
+  };
+
+  const onSave = async () => {
+    setSaving(true);
+    try {
+      const updated = await updatePage(page.site_id, page.page_id, {
+        label: label || null,
+        page_type: pageType,
+        url
+      });
+      onSaved?.(updated);
+      onOpenChange(false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const onDelete = async () => {
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      return;
+    }
+    setDeleting(true);
+    try {
+      await deletePage(page.site_id, page.page_id);
+      onDeleted?.(page.page_id);
+      onOpenChange(false);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50">
+      {/* overlay */}
+      <div
+        className="absolute inset-0 bg-black/60"
+        onClick={onClose}
+      />
+
+      {/* modal */}
+      <div className="absolute left-1/2 top-1/2 w-[min(520px,calc(100%-24px))] -translate-x-1/2 -translate-y-1/2 p-2">
+        <GlassCard className="p-5">
+          {/* header */}
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold tracking-tight">
+                PAGE EDIT / ページ編集
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                URL・種別・ラベルを変更できます
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-full border px-3 py-2 text-xs
+                         border-[rgba(var(--border),0.14)] bg-[rgba(var(--panel),0.06)]
+                         hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.18)] transition"
+            >
+              <X className="h-4 w-4 opacity-80" />
+            </button>
+          </div>
+
+          {/* form */}
+          <div className="mt-5 space-y-4">
+            {/* URL */}
+            <div className="space-y-1">
+              <div className="text-xs font-semibold text-muted-foreground">URL</div>
+              <input
+                value={url}
+                onChange={(e) => {
+                  setUrl(e.target.value);
+                  setDirty(true);
+                }}
+                className="w-full rounded-[var(--r-md)] border px-3 py-2 text-sm
+                           bg-[rgba(var(--panel),0.06)] border-[rgba(var(--border),0.12)]
+                           outline-none"
+              />
+            </div>
+
+            {/* Label */}
+            <div className="space-y-1">
+              <div className="text-xs font-semibold text-muted-foreground">LABEL（任意）</div>
+              <input
+                value={label}
+                onChange={(e) => {
+                  setLabel(e.target.value);
+                  setDirty(true);
+                }}
+                placeholder="例：公式トップ / 劇団A"
+                className="w-full rounded-[var(--r-md)] border px-3 py-2 text-sm
+                           bg-[rgba(var(--panel),0.06)] border-[rgba(var(--border),0.12)]
+                           outline-none placeholder:text-[rgba(var(--fg),0.45)]"
+              />
+            </div>
+
+            {/* Page type */}
+            <div className="space-y-1">
+              <div className="text-xs font-semibold text-muted-foreground">PAGE TYPE</div>
+              <div className="flex flex-wrap gap-2">
+                {PAGE_TYPES.map((t) => (
+                  <button
+                    key={t.value}
+                    type="button"
+                    onClick={() => {
+                      setPageType(t.value);
+                      setDirty(true);
+                    }}
+                    className={cn(
+                      "rounded-full border px-3 py-2 text-xs",
+                      "border-[rgba(var(--border),0.14)] bg-[rgba(var(--panel),0.06)]",
+                      pageType === t.value &&
+                        "shadow-[0_0_0_1px_rgba(var(--cyan),0.25),var(--glow-cyan)]"
+                    )}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* footer */}
+          <div className="mt-6 flex items-center justify-between gap-3">
+            {/* delete */}
+            <button
+              type="button"
+              onClick={onDelete}
+              disabled={deleting}
+              className={cn(
+                "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs",
+                "border-[rgba(var(--rose),0.22)] bg-[rgba(var(--rose),0.10)]",
+                "hover:shadow-[0_0_0_1px_rgba(var(--rose),0.25)] transition"
+              )}
+            >
+              {confirmDelete ? (
+                <>
+                  <AlertTriangle className="h-4 w-4" />
+                  本当に削除
+                </>
+              ) : (
+                <>
+                  <Trash2 className="h-4 w-4" />
+                  削除
+                </>
+              )}
+            </button>
+
+            {/* save */}
+            <button
+              type="button"
+              onClick={onSave}
+              disabled={!canSave || saving}
+              className={cn(
+                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-xs font-semibold",
+                "border-[rgba(var(--cyan),0.22)] bg-[rgba(var(--cyan),0.10)]",
+                "hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.25),var(--glow-cyan)] transition",
+                "disabled:opacity-50 disabled:cursor-not-allowed"
+              )}
+            >
+              <Save className="h-4 w-4 opacity-80" />
+              保存
+            </button>
+          </div>
+
+          {dirty && (
+            <div className="mt-3 text-[11px] text-muted-foreground">
+              ※ 変更があります。保存してから閉じてください。
+            </div>
+          )}
+        </GlassCard>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## O-4. PagesTable からの呼び出し例
+
+```tsx
+// components/pages/PagesTable.tsx（抜粋）
+
+const [editPage, setEditPage] = useState<Page | null>(null);
+const [editOpen, setEditOpen] = useState(false);
+
+/* row action */
+<button
+  type="button"
+  onClick={() => {
+    setEditPage(p);
+    setEditOpen(true);
+  }}
+>
+  Edit
+</button>
+
+<PageEditModal
+  open={editOpen}
+  page={editPage}
+  onOpenChange={setEditOpen}
+  onSaved={(updated) => {
+    // local state update or refetch
+  }}
+  onDeleted={(pageId) => {
+    // remove from local list or refetch
+  }}
+/>
+```
+
+---
+
+## O-5. Acceptance Criteria
+
+- [ ] URL / label / page_type が編集できる
+- [ ] 変更がある状態で閉じようとすると警告
+- [ ] 削除は2段階確認
+- [ ] 保存・削除後に親状態が更新される
+- [ ] GlassCard / Midnight Neon のデザインに統一されている
+
+---
+
 ## 次のステップ（必要なら追記）
 さらに追加が有効なコンポーネント:
 - `SiteCreateWizard`: サイト新規作成ウィザード
-- `PageEditModal`: ページURL編集/削除モーダル
-- `SiteListPage`: サイト一覧画面
+- `PageCreateFlow`: URL登録体験の改善
+- `EmptyStates`: 空状態・エラー状態のガイド

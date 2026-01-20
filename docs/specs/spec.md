@@ -7668,6 +7668,472 @@ const [pages, setPages] = useState<Page[]>([]);
 
 ---
 
-## 次のステップ（必要なら追記）
-さらに追加が有効なコンポーネント:
-- `EmptyStates`: URL未登録 / 競合不足 / GSC未連携 / 解析失敗のガイド
+# Appendix R: Empty / Error / Guard States (運用の完成度を決める重要部分)
+
+**Scope**:
+- "迷わない・詰まらない" ためのガード設計
+- 典型的な失敗・不足状態に対して
+  - 明確な原因
+  - 具体的な次アクション
+  - できればワンクリック導線（ボタン）
+- 画面:
+  - Sites list / Site detail（任意）
+  - Pages（URL管理）
+  - Run（実行）
+  - Results（結果一覧・詳細）
+
+**Targets**:
+- Next.js App Router
+- Tailwind
+- lucide-react
+- UI: GlassCard + Midnight Neon
+
+---
+
+## R-0. 重要原則（MVPの信頼感）
+
+- 失敗を"隠さない"
+- でも"責めない"
+- 次にやるべきことを **P0/P1** で提示
+- UIのトーンは統一（同じカード・同じボタン・同じラベル）
+
+---
+
+## R-1. 共通コンポーネント
+
+### R-1.1 StatePanel（Empty/Error/Guardの共通枠）
+
+```tsx
+// components/states/StatePanel.tsx
+"use client";
+
+import * as React from "react";
+import { GlassCard } from "@/components/layout/GlassCard";
+import { cn } from "@/lib/utils/cn";
+import { ArrowRight } from "lucide-react";
+
+export type StateTone = "neutral" | "cyan" | "violet" | "amber" | "rose";
+
+export interface StateAction {
+  label: string;
+  onClick: () => void;
+  tone?: StateTone; // affects button glow
+}
+
+export interface StatePanelProps {
+  icon?: React.ReactNode;
+  title: string;
+  description?: string;
+  tone?: StateTone;
+  bullets?: string[];
+  actions?: StateAction[];
+  className?: string;
+}
+
+function btnTone(t?: StateTone) {
+  if (t === "rose") return "border-[rgba(var(--rose),0.22)] bg-[rgba(var(--rose),0.10)] hover:shadow-[0_0_0_1px_rgba(var(--rose),0.25)]";
+  if (t === "amber") return "border-[rgba(var(--amber),0.22)] bg-[rgba(var(--amber),0.10)] hover:shadow-[0_0_0_1px_rgba(var(--amber),0.22)]";
+  if (t === "violet") return "border-[rgba(var(--violet),0.22)] bg-[rgba(var(--violet),0.10)] hover:shadow-[0_0_0_1px_rgba(var(--violet),0.22),var(--glow-violet)]";
+  if (t === "cyan") return "border-[rgba(var(--cyan),0.22)] bg-[rgba(var(--cyan),0.10)] hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.25),var(--glow-cyan)]";
+  return "border-[rgba(var(--border),0.14)] bg-[rgba(var(--panel),0.06)] hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.18)]";
+}
+
+export function StatePanel({
+  icon,
+  title,
+  description,
+  tone = "neutral",
+  bullets,
+  actions,
+  className
+}: StatePanelProps) {
+  const border =
+    tone === "rose"
+      ? "rgba(var(--rose),0.22)"
+      : tone === "amber"
+      ? "rgba(var(--amber),0.20)"
+      : tone === "violet"
+      ? "rgba(var(--violet),0.20)"
+      : tone === "cyan"
+      ? "rgba(var(--cyan),0.20)"
+      : "rgba(var(--border),0.12)";
+
+  const bg =
+    tone === "rose"
+      ? "rgba(var(--rose),0.08)"
+      : tone === "amber"
+      ? "rgba(var(--amber),0.08)"
+      : tone === "violet"
+      ? "rgba(var(--violet),0.08)"
+      : tone === "cyan"
+      ? "rgba(var(--cyan),0.08)"
+      : "rgba(var(--panel),0.06)";
+
+  return (
+    <GlassCard className={cn("p-6", className)} style={{ borderColor: border, background: bg } as any}>
+      <div className="flex items-start gap-3">
+        {icon ? <div className="mt-0.5">{icon}</div> : null}
+        <div className="min-w-0">
+          <div className="text-sm font-semibold tracking-tight">{title}</div>
+          {description ? <div className="mt-1 text-sm text-muted-foreground">{description}</div> : null}
+
+          {bullets?.length ? (
+            <ul className="mt-3 space-y-1 text-sm text-muted-foreground">
+              {bullets.map((b, i) => (
+                <li key={i}>• {b}</li>
+              ))}
+            </ul>
+          ) : null}
+
+          {actions?.length ? (
+            <div className="mt-4 flex flex-wrap gap-2">
+              {actions.map((a, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  onClick={a.onClick}
+                  className={cn(
+                    "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-xs font-semibold transition",
+                    btnTone(a.tone ?? tone)
+                  )}
+                >
+                  {a.label} <ArrowRight className="h-4 w-4 opacity-75" />
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </GlassCard>
+  );
+}
+```
+
+※ GlassCard が style を透過させない場合は、GlassCard を div に変更して同じ装飾をつけてもOK。
+
+---
+
+### R-1.2 InlineNotice（軽い警告）
+
+```tsx
+// components/states/InlineNotice.tsx
+"use client";
+
+import * as React from "react";
+import { cn } from "@/lib/utils/cn";
+import { AlertTriangle, Info } from "lucide-react";
+
+export function InlineNotice({
+  tone = "amber",
+  title,
+  children
+}: {
+  tone?: "amber" | "rose" | "neutral";
+  title?: string;
+  children: React.ReactNode;
+}) {
+  const border =
+    tone === "rose" ? "rgba(var(--rose),0.22)" : tone === "amber" ? "rgba(var(--amber),0.20)" : "rgba(var(--border),0.12)";
+  const bg =
+    tone === "rose" ? "rgba(var(--rose),0.08)" : tone === "amber" ? "rgba(var(--amber),0.08)" : "rgba(var(--panel),0.06)";
+  const Icon = tone === "rose" ? AlertTriangle : Info;
+
+  return (
+    <div className={cn("rounded-[var(--r-md)] border p-3")} style={{ borderColor: border, background: bg }}>
+      <div className="flex items-start gap-2">
+        <Icon className="h-4 w-4 opacity-80 mt-0.5" />
+        <div className="min-w-0">
+          {title ? <div className="text-xs font-semibold">{title}</div> : null}
+          <div className="text-xs text-muted-foreground">{children}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## R-2. Guard判定ユーティリティ（Runを押せる条件）
+
+```ts
+// lib/run/guards.ts
+import type { Page } from "@/lib/api/types";
+
+export interface RunGuards {
+  ok: boolean;
+  reasons: { code: string; message: string }[];
+}
+
+export function evaluateRunGuards(pages: Page[]): RunGuards {
+  const reasons: RunGuards["reasons"] = [];
+
+  const official = pages.filter(p => p.page_type === "official_homepage");
+  const competitors = pages.filter(p => p.page_type === "competitor_page");
+
+  if (official.length === 0) reasons.push({ code: "NO_OFFICIAL", message: "公式ホームページが未登録です" });
+  if (official.length > 1) reasons.push({ code: "MULTI_OFFICIAL", message: "公式ホームページが複数登録されています（1件にしてください）" });
+
+  if (competitors.length < 2) reasons.push({ code: "FEW_COMPETITORS", message: "競合ページが2件未満です（2件必要）" });
+  if (competitors.length > 2) reasons.push({ code: "MANY_COMPETITORS", message: "競合ページが2件を超えています（MVPは2件想定）" });
+
+  // Optional: duplicate URL check
+  const urls = pages.map(p => p.url.trim());
+  if (new Set(urls).size !== urls.length) reasons.push({ code: "DUP_URL", message: "同一URLが重複登録されています" });
+
+  return { ok: reasons.length === 0, reasons };
+}
+```
+
+---
+
+## R-3. 各画面の Empty/Error/Guard States
+
+### R-3.1 Pages screen
+
+**Case A: URLが0件（Empty）**
+- 何が必要か：公式1・競合2
+- 次アクション：Add URL / Wizardへ
+
+```tsx
+import { StatePanel } from "@/components/states/StatePanel";
+import { Link2, Crown, Swords } from "lucide-react";
+
+if (pages.length === 0) {
+  return (
+    <StatePanel
+      icon={<Link2 className="h-5 w-5 opacity-80" />}
+      title="URLが未登録です"
+      description="まずは公式サイト1件と、比較用の競合2件を登録してください。"
+      tone="cyan"
+      bullets={[
+        "公式ホームページ（必須）: 1 URL",
+        "競合ページ（必須）: 2 URLs",
+        "紹介・掲載ページ（任意）: 0〜5 URLs"
+      ]}
+      actions={[
+        { label: "URLを追加", onClick: () => setAddOpen(true), tone: "cyan" },
+        { label: "Wizardでまとめて作成", onClick: () => setWizardOpen(true), tone: "violet" }
+      ]}
+    />
+  );
+}
+```
+
+**Case B: official/competitor不足（Guard）**
+- 表示箇所：ページ一覧上部 or Runボタン付近
+- 次アクション：不足数を明示してAddへ誘導
+
+```tsx
+import { InlineNotice } from "@/components/states/InlineNotice";
+import { evaluateRunGuards } from "@/lib/run/guards";
+
+const guards = evaluateRunGuards(pages);
+if (!guards.ok) {
+  return (
+    <InlineNotice tone="amber" title="Runの前提が満たされていません">
+      {guards.reasons.map(r => <div key={r.code}>• {r.message}</div>)}
+      <div className="mt-2">ページタイプを修正するには Edit を使ってください。</div>
+    </InlineNotice>
+  );
+}
+```
+
+---
+
+### R-3.2 Run screen
+
+**Case A: prerequisites not met（Run disabled）**
+- Runボタンは disabled
+- 代わりに StatePanel を表示（右側 or ボタン直下）
+- ワンクリックで Pagesへ
+
+```tsx
+import { StatePanel } from "@/components/states/StatePanel";
+import { evaluateRunGuards } from "@/lib/run/guards";
+import { AlertTriangle } from "lucide-react";
+import { useRouter } from "next/navigation";
+
+const guards = evaluateRunGuards(pages);
+const router = useRouter();
+
+{!guards.ok ? (
+  <StatePanel
+    icon={<AlertTriangle className="h-5 w-5 opacity-80" />}
+    title="Runできません（前提条件未達）"
+    description="公式1件・競合2件が揃うと診断を開始できます。"
+    tone="amber"
+    bullets={guards.reasons.map(r => r.message)}
+    actions={[
+      { label: "Pagesで修正する", onClick: () => router.push(`/sites/${siteId}/pages`), tone: "cyan" }
+    ]}
+  />
+) : null}
+```
+
+**Case B: GSC 未連携（enableGsc=true だが propertyが空）**
+- エラーにせず "Guard warning" として扱う（MVP）
+- 表示：RunConfigCard の下に InlineNotice
+- 対応：GSC OFFにするか propertyを入れる
+
+```tsx
+{enableGsc && !gscProperty ? (
+  <InlineNotice tone="amber" title="GSCが有効ですがプロパティが未入力です">
+    Runは可能ですが、Search Consoleデータは取り込まれません。
+  </InlineNotice>
+) : null}
+```
+
+---
+
+### R-3.3 Results list
+
+**Case A: 結果が0件（Empty）**
+- "まずRunしよう" を強く
+- 導線：Runへ
+
+```tsx
+import { StatePanel } from "@/components/states/StatePanel";
+import { FileText } from "lucide-react";
+import { useRouter } from "next/navigation";
+
+if (results.length === 0) {
+  return (
+    <StatePanel
+      icon={<FileText className="h-5 w-5 opacity-80" />}
+      title="まだレポートがありません"
+      description="Runを実行すると、スコア・原因・ToDoが生成されます。"
+      tone="violet"
+      bullets={[
+        "公式1 + 競合2 の比較",
+        "テクニカル/コンテンツの優先度付きToDo",
+        "根拠（evidence）つきで"コンサルっぽい"指摘"
+      ]}
+      actions={[
+        { label: "Runへ", onClick: () => router.push(`/sites/${siteId}/run`), tone: "violet" }
+      ]}
+    />
+  );
+}
+```
+
+---
+
+### R-3.4 Result detail
+
+**Case A: result_id 不正 / fetch失敗（Error）**
+- "結果が見つからない" を明確に
+- 導線：Results一覧へ戻る / Runする
+
+```tsx
+<StatePanel
+  icon={<AlertTriangle className="h-5 w-5 opacity-80" />}
+  title="レポートが見つかりません"
+  description="URLが削除された、またはジョブが失敗した可能性があります。"
+  tone="rose"
+  actions={[
+    { label: "Results一覧へ", onClick: () => router.push(`/sites/${siteId}/results`), tone: "cyan" },
+    { label: "Runを再実行", onClick: () => router.push(`/sites/${siteId}/run`), tone: "violet" }
+  ]}
+/>
+```
+
+---
+
+## R-4. Job failed states（失敗ジョブの扱い）
+
+### R-4.1 JobStatusCard で failed を表示済み
+
+追加で推奨:
+- error_message を "短い要約 + 詳細（折りたたみ）"
+- "Retry" で同一targets/configを再実行（MVPは「もう一度Run」でも可）
+
+### R-4.2 JobHistoryList で failed に対策導線
+- "Open Job" → 失敗ログ表示（MVP: error_message だけ）
+- "Run again" → Run画面へ
+
+```tsx
+// JobHistoryList row actions
+{j.status === "failed" ? (
+  <button onClick={() => router.push(`/sites/${siteId}/run`)} className="...">
+    Run again
+  </button>
+) : null}
+```
+
+---
+
+## R-5. Empty State Copy（統一トーン）
+
+テキストは短く・行動は具体的に。コンサルっぽく言い切る。
+
+- **URL未登録**:
+  - 「まずは公式1件と競合2件を登録してください」
+- **競合不足**:
+  - 「競合は2件必要です（MVP要件）」
+- **結果なし**:
+  - 「Runを実行するとレポートが生成されます」
+- **失敗**:
+  - 「原因はエラーメッセージにあります。URLとネットワークを確認してください」
+
+---
+
+## R-6. Acceptance Criteria（必須チェック）
+
+**Pages:**
+- [ ] URL 0件 → Empty panel が出る（Add/Wizard導線あり）
+- [ ] official/competitor不足 → InlineNotice が出る（理由列挙）
+
+**Run:**
+- [ ] prerequisites未達 → Runボタン無効 + Guard panel が出る（Pages導線）
+- [ ] GSC設定不足 → 警告（Runは可能）
+
+**Results:**
+- [ ] 0件 → Run導線付きEmpty panel
+- [ ] result fetch失敗 → Error panel（Results/Run導線）
+
+**Job failed:**
+- [ ] failedが明示され、次アクションがある（Retry/Run again）
+
+---
+
+## R-7. 実装順（迷わないための順序）
+
+**P0:**
+1. StatePanel / InlineNotice（共通）
+2. Pages empty / guard notice
+3. Run guard panel
+4. Results empty
+
+**P1:**
+5. Result detail not found
+6. Failed job run again導線の改善
+
+これで「MVPが運用で詰まらない」状態になります。
+
+次にさらに完成度を上げるなら、Guard理由の中で **"どのページが原因か（page_id）"** を返して、ボタンで該当ページの EditModal を開けるようにすると、コンサルツール感がもう一段上がります。
+
+---
+
+## 仕様書完成
+
+これで Appendix A〜R の全仕様が揃いました。
+
+| Appendix | 内容 |
+|----------|------|
+| A〜D | 分析仕様 / JSONスキーマ / 判定ルール / AIプロンプト |
+| F | Next.js 画面ワイヤー / Props / API client |
+| G | UIテーマ（Midnight Neon）/ GlassCard / ScoreBadge / TodoBoard |
+| H | ResultHeader / ReportMarkdown |
+| I | EvidenceDrawer / TodoDetailModal |
+| J | Run画面 進行状況（queued → running → done） |
+| K | Estimated Tasks（Run前の納得感） |
+| L | Chips → Checklist morph（Run後の進捗体験） |
+| M | RunConfigCard / TargetSummaryCard / JobHistoryList |
+| N | RunConfig Preset（Default / Fast / Deep） |
+| O | PageEditModal（URL編集・削除） |
+| P | SiteCreateWizard（新規サイト作成ウィザード） |
+| Q | PageCreateFlow Improvements（URL登録体験の強化） |
+| R | Empty / Error / Guard States |
+
+**実装可能なMD設計が完成しました。**

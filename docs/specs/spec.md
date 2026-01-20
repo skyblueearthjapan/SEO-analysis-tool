@@ -8115,9 +8115,389 @@ if (results.length === 0) {
 
 ---
 
+# Appendix S: Guard Reasons with page_id + One-click Fix (Open EditModal)
+
+**Goal**:
+- Guard理由に「原因となっている page_id」を紐づける
+- UI上で「Fix」ボタン → 該当ページの PageEditModal を即オープン
+- "どこを直せばいいか" が明確になり、コンサルツール感が一段上がる
+
+**Scope**:
+- Guard評価の拡張（evaluateRunGuardsWithPage）
+- UI: GuardPanel に Fix buttons を追加
+- Pages画面・Run画面の両方で利用できるようにする
+
+---
+
+## S-0. Design: GuardReason structure
+
+```ts
+// lib/run/guards.ts（拡張）
+import type { Page, UUID } from "@/lib/api/types";
+
+export type GuardCode =
+  | "NO_OFFICIAL"
+  | "MULTI_OFFICIAL"
+  | "FEW_COMPETITORS"
+  | "MANY_COMPETITORS"
+  | "DUP_URL"
+  | "COMPETITOR_SAME_DOMAIN_AS_OFFICIAL"
+  | "COMPETITORS_SAME_DOMAIN";
+
+export interface GuardReason {
+  code: GuardCode;
+  message: string;
+
+  /** Fix target: open PageEditModal for these pages (if any) */
+  page_ids?: UUID[];
+
+  /** Optional hints to simplify UI copy */
+  severity?: "block" | "warn";
+}
+
+export interface RunGuards {
+  ok: boolean;
+  reasons: GuardReason[];
+}
+```
+
+---
+
+## S-1. Guard evaluation with page_id
+
+```ts
+// lib/run/guards.ts（追加）
+function host(u: string) {
+  try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return ""; }
+}
+function norm(u: string) { return u.trim(); }
+
+export function evaluateRunGuardsWithPage(pages: Page[]): RunGuards {
+  const reasons: GuardReason[] = [];
+
+  const officials = pages.filter(p => p.page_type === "official_homepage");
+  const competitors = pages.filter(p => p.page_type === "competitor_page");
+
+  // A) official missing / multiple
+  if (officials.length === 0) {
+    reasons.push({
+      code: "NO_OFFICIAL",
+      message: "公式ホームページが未登録です（公式を1件登録してください）",
+      severity: "block"
+    });
+  }
+
+  if (officials.length > 1) {
+    reasons.push({
+      code: "MULTI_OFFICIAL",
+      message: "公式ホームページが複数登録されています（公式は1件にしてください）",
+      page_ids: officials.map(p => p.page_id),
+      severity: "block"
+    });
+  }
+
+  // B) competitor count
+  if (competitors.length < 2) {
+    reasons.push({
+      code: "FEW_COMPETITORS",
+      message: "競合ページが2件未満です（競合を2件登録してください）",
+      severity: "block"
+    });
+  }
+
+  if (competitors.length > 2) {
+    reasons.push({
+      code: "MANY_COMPETITORS",
+      message: "競合ページが2件を超えています（MVPは2件想定です。2件に絞ってください）",
+      page_ids: competitors.map(p => p.page_id),
+      severity: "block"
+    });
+  }
+
+  // C) duplicate URL (exact)
+  const urlToPages = new Map<string, Page[]>();
+  for (const p of pages) {
+    const key = norm(p.url);
+    urlToPages.set(key, [...(urlToPages.get(key) ?? []), p]);
+  }
+  const dupGroups = [...urlToPages.entries()].filter(([, arr]) => arr.length >= 2);
+  if (dupGroups.length) {
+    // attach all duplicated pages
+    const ids = dupGroups.flatMap(([, arr]) => arr.map(p => p.page_id));
+    reasons.push({
+      code: "DUP_URL",
+      message: "同一URLが重複登録されています（重複を解消してください）",
+      page_ids: ids,
+      severity: "block"
+    });
+  }
+
+  // D) competitor same domain checks (warn)
+  const official = officials.length === 1 ? officials[0] : null;
+  const officialHost = official ? host(official.url) : null;
+
+  if (officialHost) {
+    const sameAsOfficial = competitors.filter(c => host(c.url) === officialHost);
+    if (sameAsOfficial.length) {
+      reasons.push({
+        code: "COMPETITOR_SAME_DOMAIN_AS_OFFICIAL",
+        message: "競合が公式と同一ドメインです（ページタイプが正しいか確認してください）",
+        page_ids: sameAsOfficial.map(p => p.page_id),
+        severity: "warn"
+      });
+    }
+  }
+
+  // E) competitors share same domain (warn)
+  const hostGroups = new Map<string, Page[]>();
+  for (const c of competitors) {
+    const h = host(c.url);
+    hostGroups.set(h, [...(hostGroups.get(h) ?? []), c]);
+  }
+  const competitorDupHost = [...hostGroups.entries()].filter(([h, arr]) => h && arr.length >= 2);
+  if (competitorDupHost.length) {
+    const ids = competitorDupHost.flatMap(([, arr]) => arr.map(p => p.page_id));
+    reasons.push({
+      code: "COMPETITORS_SAME_DOMAIN",
+      message: "競合が同一ドメインで複数件です（別競合のURLか確認してください）",
+      page_ids: ids,
+      severity: "warn"
+    });
+  }
+
+  const blocking = reasons.some(r => (r.severity ?? "block") === "block");
+  return { ok: !blocking, reasons };
+}
+```
+
+---
+
+## S-2. UI: GuardPanel with Fix buttons
+
+```tsx
+// components/run/GuardPanel.tsx（新規）
+// - ガード理由をカードで表示
+// - Fix ボタン → 親の onFix(pageId) を呼ぶ
+// - page_id が無い理由は「Pagesへ」導線にする
+
+"use client";
+
+import * as React from "react";
+import { StatePanel } from "@/components/states/StatePanel";
+import type { GuardReason } from "@/lib/run/guards";
+import type { UUID } from "@/lib/api/types";
+import { AlertTriangle, Wrench } from "lucide-react";
+
+export interface GuardPanelProps {
+  siteId: UUID;
+  reasons: GuardReason[];
+  onGoPages: () => void;
+  onFixPage: (pageId: UUID) => void;
+}
+
+export function GuardPanel({ reasons, onGoPages, onFixPage }: GuardPanelProps) {
+  const bullets = reasons.map((r) => r.message);
+
+  // We show actions:
+  // - primary: Pagesへ
+  // - secondary: if exactly 1 page_id for top reason → Fix it
+  const topFixId = reasons.find(r => r.page_ids?.length)?.page_ids?.[0] ?? null;
+
+  return (
+    <StatePanel
+      icon={<AlertTriangle className="h-5 w-5 opacity-80" />}
+      title="Runできません（前提条件未達）"
+      description="不足や重複を解消すると診断を開始できます。"
+      tone="amber"
+      bullets={bullets}
+      actions={[
+        { label: "Pagesで修正する", onClick: onGoPages, tone: "cyan" },
+        ...(topFixId
+          ? [{ label: "Fix（該当ページを編集）", onClick: () => onFixPage(topFixId), tone: "violet" }]
+          : [])
+      ]}
+    />
+  );
+}
+```
+
+**NOTE**: 複数の page_ids がある場合は、詳細リストの各行にFixを付けるとさらに気持ちいい（次節）。
+
+---
+
+## S-3. UI: reason list with per-page Fix (recommended)
+
+```tsx
+// components/run/GuardReasonList.tsx（新規）
+// - 各理由を表示
+// - その理由に紐づく page_ids があれば複数Fixボタンを出す
+// - ラベル表示があると最高なので pagesById を渡して label を出す
+
+"use client";
+
+import * as React from "react";
+import type { GuardReason } from "@/lib/run/guards";
+import type { Page, UUID } from "@/lib/api/types";
+import { Wrench } from "lucide-react";
+
+export interface GuardReasonListProps {
+  reasons: GuardReason[];
+  pagesById: Record<string, Page>;
+  onFixPage: (pageId: UUID) => void;
+}
+
+export function GuardReasonList({ reasons, pagesById, onFixPage }: GuardReasonListProps) {
+  return (
+    <div className="mt-3 space-y-2">
+      {reasons.map((r, idx) => (
+        <div
+          key={idx}
+          className="rounded-[var(--r-md)] border p-3 bg-[rgba(var(--panel),0.06)] border-[rgba(var(--border),0.12)]"
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <div className="text-xs font-semibold">{r.message}</div>
+              <div className="mt-1 text-[10px] text-muted-foreground uppercase tracking-[0.18em]">
+                {r.code} • {r.severity ?? "block"}
+              </div>
+            </div>
+
+            {r.page_ids?.length ? (
+              <div className="flex flex-wrap gap-2">
+                {r.page_ids.slice(0, 3).map((pid) => {
+                  const p = pagesById[String(pid)];
+                  const label = p?.label || p?.url || "page";
+                  return (
+                    <button
+                      key={String(pid)}
+                      type="button"
+                      onClick={() => onFixPage(pid)}
+                      className="inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-semibold
+                                 border-[rgba(var(--violet),0.22)] bg-[rgba(var(--violet),0.10)]
+                                 hover:shadow-[0_0_0_1px_rgba(var(--violet),0.22),var(--glow-violet)] transition"
+                      title={p?.url}
+                    >
+                      <Wrench className="h-4 w-4 opacity-80" />
+                      Fix: {label.length > 18 ? label.slice(0, 18) + "…" : label}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
+          </div>
+
+          {r.page_ids && r.page_ids.length > 3 ? (
+            <div className="mt-2 text-xs text-muted-foreground">
+              +{r.page_ids.length - 3} more…
+            </div>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+```
+
+---
+
+## S-4. Wiring: Run画面でEditModalを開く
+
+### S-4.1 RunScreen state
+- `editPage: Page | null`
+- `editOpen: boolean`
+- `onFixPage(pageId)` で `pagesById[pageId]` をセットして modal open
+
+```tsx
+import { evaluateRunGuardsWithPage } from "@/lib/run/guards";
+import { GuardPanel } from "@/components/run/GuardPanel";
+import { GuardReasonList } from "@/components/run/GuardReasonList";
+import { PageEditModal } from "@/components/pages/PageEditModal";
+
+const pagesById = React.useMemo(
+  () => Object.fromEntries(pages.map(p => [String(p.page_id), p])),
+  [pages]
+);
+
+const guards = evaluateRunGuardsWithPage(pages);
+
+const [editOpen, setEditOpen] = React.useState(false);
+const [editPage, setEditPage] = React.useState<Page | null>(null);
+
+const onFixPage = (pageId: UUID) => {
+  const p = pagesById[String(pageId)];
+  if (!p) return;
+  setEditPage(p);
+  setEditOpen(true);
+};
+
+{!guards.ok ? (
+  <>
+    <GuardPanel
+      siteId={siteId}
+      reasons={guards.reasons.filter(r => (r.severity ?? "block") === "block")}
+      onGoPages={() => router.push(`/sites/${siteId}/pages`)}
+      onFixPage={onFixPage}
+    />
+
+    {/* optional: show detailed list including warnings */}
+    <GuardReasonList
+      reasons={guards.reasons}
+      pagesById={pagesById}
+      onFixPage={onFixPage}
+    />
+
+    <PageEditModal
+      open={editOpen}
+      onOpenChange={setEditOpen}
+      page={editPage}
+      onSaved={(updated) => {
+        // refresh pages list or patch local
+        setPages(prev => prev.map(x => x.page_id === updated.page_id ? updated : x));
+        setEditPage(updated);
+      }}
+      onDeleted={(pid) => {
+        setPages(prev => prev.filter(x => x.page_id !== pid));
+        setEditPage(null);
+      }}
+    />
+  </>
+) : null}
+```
+
+---
+
+## S-5. Pages画面にも同じ "Fix" を出す（optional but nice）
+
+- Pages上部の InlineNotice を GuardReasonList に置き換えると
+- 一覧を見ながら即修正できる
+- Run画面へ行かずに整えられる
+
+---
+
+## S-6. Acceptance Criteria
+
+- [ ] Guard理由の一部に page_ids が付与される
+  - MULTI_OFFICIAL / MANY_COMPETITORS / DUP_URL / competitor domain warnings など
+- [ ] Run画面のガード表示に Fix ボタンが出る
+- [ ] Fix ボタンで該当ページの PageEditModal が開く
+- [ ] 保存/削除後に guards が再評価され、ガードが解消される
+
+---
+
+## S-7. Notes / Future improvements
+
+- **NO_OFFICIAL / FEW_COMPETITORS** は page_id が存在しないので
+  - Fixは "Add URL" / "Pagesへ" を出すのが正しい
+- **DUP_URL** は該当ページが複数なので
+  - Fixボタンは複数出す or "Open first" + "more…" 表示が良い
+- **Backendでも同じ guard 判定を返したい場合は**
+  - `/sites/{site_id}/run-guards` を作り、FE側と完全一致させる
+
+---
+
 ## 仕様書完成
 
-これで Appendix A〜R の全仕様が揃いました。
+これで Appendix A〜S の全仕様が揃いました。
 
 | Appendix | 内容 |
 |----------|------|
@@ -8135,5 +8515,6 @@ if (results.length === 0) {
 | P | SiteCreateWizard（新規サイト作成ウィザード） |
 | Q | PageCreateFlow Improvements（URL登録体験の強化） |
 | R | Empty / Error / Guard States |
+| S | Guard Reasons with page_id + One-click Fix |
 
 **実装可能なMD設計が完成しました。**

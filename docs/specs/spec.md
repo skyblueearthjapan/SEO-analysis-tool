@@ -3215,7 +3215,578 @@ export function ResultView({
 
 ---
 
+# Appendix I: EvidenceDrawer + Todo Detail Modal (Copy buttons)
+
+**Target**: Next.js + Tailwind + lucide-react + shadcn/ui (Radix Dialog/Drawer)
+
+**Goal**:
+- 根拠（evidence）を"気持ちよく"閲覧できるDrawer
+- Todoカードをクリック → 詳細モーダル
+  - 手順/根拠/具体案（title案・h2案・FAQ・依頼文）を整理
+  - コピーボタンで即使える（コンサル感UP）
+
+---
+
+## I-0. Dependencies (recommended)
+
+- shadcn/ui:
+  - `Dialog`, `Sheet` (or `Drawer`)
+  - `Button`, `Separator`, `Tabs`, `ScrollArea`, `Badge`, `Toast` (optional)
+- icons: `lucide-react`
+- clipboard: `navigator.clipboard.writeText`
+
+> If you don't use shadcn/ui, keep logic and replace components.
+
+---
+
+## I-1. Clipboard Utility（`lib/utils/clipboard.ts`）
+
+> Copyの共通関数。失敗時のfallback付き。
+
+```ts
+// lib/utils/clipboard.ts
+export async function copyToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // Fallback for older browsers
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}
+```
+
+---
+
+## I-2. EvidenceDrawer Component
+
+> Evidence（claim + support）をカード化。検索/フィルタがあると最高に気持ちいい。
+> MVP: search input + highlight（簡易）
+
+```tsx
+// components/results/EvidenceDrawer.tsx
+"use client";
+
+import * as React from "react";
+import type { Diagnosis } from "@/lib/api/types";
+import { GlassCard } from "@/components/layout/GlassCard";
+import { cn } from "@/lib/utils/cn";
+import { Search, X } from "lucide-react";
+
+// If using shadcn/ui Sheet:
+// import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
+
+export interface EvidenceDrawerProps {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  evidence: Diagnosis["evidence"];
+}
+
+/**
+ * Minimal drawer implementation without shadcn:
+ * - fixed overlay + side panel
+ * Replace with shadcn Sheet for nicer a11y if available.
+ */
+export function EvidenceDrawer({ open, onOpenChange, evidence }: EvidenceDrawerProps) {
+  const [q, setQ] = React.useState("");
+
+  const filtered = React.useMemo(() => {
+    if (!q.trim()) return evidence;
+    const query = q.toLowerCase();
+    return evidence.filter((e) => {
+      const s = (e.claim + " " + e.support.join(" ")).toLowerCase();
+      return s.includes(query);
+    });
+  }, [q, evidence]);
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50">
+      {/* overlay */}
+      <div
+        className="absolute inset-0 bg-black/60"
+        onClick={() => onOpenChange(false)}
+      />
+      {/* panel */}
+      <div className="absolute right-0 top-0 h-full w-full max-w-[520px] p-4">
+        <GlassCard className="h-full p-5">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold tracking-tight">EVIDENCE / 根拠</div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                重要な指摘の裏付け（数値・差分・観測）を一覧できます
+              </div>
+            </div>
+            <button
+              type="button"
+              className="rounded-full border px-3 py-2 text-xs border-[rgba(var(--border),var(--border-alpha))] bg-[rgba(var(--panel),0.06)] hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.22),var(--glow-cyan)] transition"
+              onClick={() => onOpenChange(false)}
+            >
+              <X className="h-4 w-4 opacity-80" />
+            </button>
+          </div>
+
+          {/* Search */}
+          <div className="mt-4 flex items-center gap-2 rounded-[var(--r-md)] border px-3 py-2 bg-[rgba(var(--panel),0.06)] border-[rgba(var(--border),0.12)]">
+            <Search className="h-4 w-4 opacity-70" />
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="検索（例：CTR / h2 / pagespeed）"
+              className="w-full bg-transparent text-sm outline-none placeholder:text-[rgba(var(--fg),0.45)]"
+            />
+            {q && (
+              <button
+                type="button"
+                className="text-xs text-muted-foreground hover:opacity-90"
+                onClick={() => setQ("")}
+              >
+                clear
+              </button>
+            )}
+          </div>
+
+          {/* List */}
+          <div className="mt-4 h-[calc(100%-140px)] overflow-auto pr-2">
+            <div className="space-y-3">
+              {filtered.length === 0 ? (
+                <div className="text-xs text-muted-foreground">一致する根拠がありません</div>
+              ) : (
+                filtered.map((e, idx) => (
+                  <div
+                    key={idx}
+                    className={cn(
+                      "rounded-[var(--r-md)] border p-4",
+                      "bg-[rgba(var(--panel),0.06)]",
+                      "border-[rgba(var(--border),0.12)]"
+                    )}
+                  >
+                    <div className="text-sm font-semibold leading-snug">{e.claim}</div>
+                    <ul className="mt-2 space-y-1">
+                      {e.support.map((s, i) => (
+                        <li key={i} className="text-xs text-muted-foreground">
+                          • {s}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* Footer note */}
+          <div className="mt-4 text-[10px] text-muted-foreground uppercase tracking-[0.18em]">
+            evidence is generated by rule engine
+          </div>
+        </GlassCard>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## I-3. TodoDetailModal Component
+
+> Todoをクリックした時の"コンサル納品物感"を演出する要。
+> - Summary（title/details/impact/effort）
+> - Steps（手順）
+> - Evidence（根拠）
+> - Examples（title案/h2案/FAQ/依頼文）をタブ化
+> - Copyボタン：1クリックでコピー
+
+```tsx
+// components/results/TodoDetailModal.tsx
+"use client";
+
+import * as React from "react";
+import type { Todo } from "@/lib/api/types";
+import { GlassCard } from "@/components/layout/GlassCard";
+import { copyToClipboard } from "@/lib/utils/clipboard";
+import { cn } from "@/lib/utils/cn";
+import { Check, Copy, X } from "lucide-react";
+
+export interface TodoDetailModalProps {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  todo: Todo | null;
+}
+
+function Chip({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="rounded-full border px-2 py-1 text-[10px] uppercase tracking-wider border-[rgba(var(--border),0.14)] bg-[rgba(var(--panel),0.06)]">
+      {children}
+    </span>
+  );
+}
+
+function SectionTitle({ children }: { children: React.ReactNode }) {
+  return <div className="text-xs font-semibold tracking-wide text-muted-foreground">{children}</div>;
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [ok, setOk] = React.useState(false);
+
+  const onCopy = async () => {
+    const done = await copyToClipboard(text);
+    setOk(done);
+    setTimeout(() => setOk(false), 1200);
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={onCopy}
+      className={cn(
+        "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs",
+        "border-[rgba(var(--border),var(--border-alpha))]",
+        "bg-[rgba(var(--panel),0.06)] backdrop-blur-[12px]",
+        "hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.22),var(--glow-cyan)]",
+        "transition-all duration-200 ease-out"
+      )}
+    >
+      {ok ? <Check className="h-4 w-4 opacity-80" /> : <Copy className="h-4 w-4 opacity-80" />}
+      <span className="font-medium">{ok ? "Copied" : "Copy"}</span>
+    </button>
+  );
+}
+
+function renderListOrEmpty(items?: string[]) {
+  if (!items || items.length === 0) return <div className="text-xs text-muted-foreground">なし</div>;
+  return (
+    <ul className="space-y-1">
+      {items.map((x, i) => (
+        <li key={i} className="text-xs text-muted-foreground">• {x}</li>
+      ))}
+    </ul>
+  );
+}
+
+export function TodoDetailModal({ open, onOpenChange, todo }: TodoDetailModalProps) {
+  const [tab, setTab] = React.useState<"steps" | "examples" | "evidence">("steps");
+
+  React.useEffect(() => {
+    if (open) setTab("steps");
+  }, [open]);
+
+  if (!open || !todo) return null;
+
+  // Copy targets
+  const copyPack: { label: string; text: string; show: boolean }[] = [
+    {
+      label: "ToDo details",
+      text: `${todo.title}\n\n${todo.details}\n\nPriority: ${todo.priority}\nCategory: ${todo.category}\nImpact: ${todo.impact}\nEffort: ${todo.effort}`,
+      show: true
+    },
+    {
+      label: "Title variants",
+      text: (todo.examples?.title_variants || []).join("\n"),
+      show: !!todo.examples?.title_variants?.length
+    },
+    {
+      label: "H2 outline",
+      text: (todo.examples?.h2_outline || []).join("\n"),
+      show: !!todo.examples?.h2_outline?.length
+    },
+    {
+      label: "FAQ questions",
+      text: (todo.examples?.faq_questions || []).join("\n"),
+      show: !!todo.examples?.faq_questions?.length
+    },
+    {
+      label: "Outreach message",
+      text: todo.examples?.outreach_message_draft_jp || "",
+      show: !!todo.examples?.outreach_message_draft_jp
+    }
+  ];
+
+  return (
+    <div className="fixed inset-0 z-50">
+      {/* overlay */}
+      <div className="absolute inset-0 bg-black/60" onClick={() => onOpenChange(false)} />
+      {/* modal */}
+      <div className="absolute left-1/2 top-1/2 w-[min(920px,calc(100%-24px))] -translate-x-1/2 -translate-y-1/2 p-2">
+        <GlassCard className="p-5">
+          {/* header */}
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-2">
+              <div className="text-sm font-semibold tracking-tight">TODO DETAIL / 対策詳細</div>
+              <div className="text-lg font-semibold leading-snug">{todo.title}</div>
+              <div className="text-sm text-muted-foreground">{todo.details}</div>
+
+              <div className="mt-2 flex flex-wrap gap-2">
+                <Chip>{todo.priority}</Chip>
+                <Chip>{todo.category}</Chip>
+                <Chip>impact {todo.impact}</Chip>
+                <Chip>effort {todo.effort}</Chip>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              className="rounded-full border px-3 py-2 text-xs border-[rgba(var(--border),var(--border-alpha))] bg-[rgba(var(--panel),0.06)] hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.22),var(--glow-cyan)] transition"
+              onClick={() => onOpenChange(false)}
+            >
+              <X className="h-4 w-4 opacity-80" />
+            </button>
+          </div>
+
+          {/* tabs */}
+          <div className="mt-5 flex items-center gap-2">
+            {[
+              { k: "steps", label: "STEPS / 手順" },
+              { k: "examples", label: "EXAMPLES / 具体案" },
+              { k: "evidence", label: "EVIDENCE / 根拠" }
+            ].map((t) => (
+              <button
+                key={t.k}
+                type="button"
+                onClick={() => setTab(t.k as any)}
+                className={cn(
+                  "rounded-full border px-3 py-2 text-xs tracking-wide",
+                  "border-[rgba(var(--border),0.14)] bg-[rgba(var(--panel),0.06)]",
+                  tab === t.k
+                    ? "shadow-[0_0_0_1px_rgba(var(--cyan),0.25),var(--glow-cyan)]"
+                    : "opacity-80 hover:opacity-100"
+                )}
+              >
+                {t.label}
+              </button>
+            ))}
+
+            <div className="ml-auto flex flex-wrap gap-2">
+              {copyPack.filter((c) => c.show).map((c) => (
+                <CopyButton key={c.label} text={c.text} />
+              ))}
+            </div>
+          </div>
+
+          {/* content */}
+          <div className="mt-4 grid gap-4 lg:grid-cols-3">
+            {/* left: navigation/summary */}
+            <div className="lg:col-span-1 space-y-3">
+              <GlassCard className="p-4">
+                <SectionTitle>SUMMARY</SectionTitle>
+                <div className="mt-2 text-xs text-muted-foreground">
+                  このToDoは <span className="font-semibold text-[rgba(var(--fg),0.9)]">{todo.priority}</span> として提案されています。
+                  まずは小さく直して反応を見る設計です。
+                </div>
+              </GlassCard>
+
+              <GlassCard className="p-4">
+                <SectionTitle>QUICK NOTES</SectionTitle>
+                <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
+                  <li>• 変更日を記録して、7日/28日で検証</li>
+                  <li>• 同時に大改修しない（原因特定が難しくなる）</li>
+                  <li>• 競合差分がある場合はそこを優先</li>
+                </ul>
+              </GlassCard>
+            </div>
+
+            {/* right: main */}
+            <div className="lg:col-span-2">
+              <GlassCard className="p-4">
+                {tab === "steps" && (
+                  <div className="space-y-3">
+                    <SectionTitle>STEPS / 手順</SectionTitle>
+                    <ol className="mt-2 space-y-2 pl-4 text-sm">
+                      <li className="text-sm">
+                        <span className="font-semibold">1.</span>{" "}
+                        対象箇所を特定（title/h2/FAQ/リンクなど）
+                      </li>
+                      <li className="text-sm">
+                        <span className="font-semibold">2.</span>{" "}
+                        修正案を適用（下の具体案をコピーして使える）
+                      </li>
+                      <li className="text-sm">
+                        <span className="font-semibold">3.</span>{" "}
+                        変更日を記録し、7日/28日でCTR/順位/表示回数を確認
+                      </li>
+                    </ol>
+
+                    <div className="mt-3">
+                      <SectionTitle>DETAIL</SectionTitle>
+                      <div className="mt-2 text-sm text-muted-foreground whitespace-pre-wrap">
+                        {todo.details}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {tab === "examples" && (
+                  <div className="space-y-5">
+                    <SectionTitle>EXAMPLES / 具体案</SectionTitle>
+
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <div className="text-xs font-semibold text-muted-foreground">TITLE VARIANTS</div>
+                          {todo.examples?.title_variants?.length ? (
+                            <CopyButton text={todo.examples.title_variants.join("\n")} />
+                          ) : null}
+                        </div>
+                        {renderListOrEmpty(todo.examples?.title_variants)}
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <div className="text-xs font-semibold text-muted-foreground">META DESCRIPTION</div>
+                          {todo.examples?.meta_description_variants?.length ? (
+                            <CopyButton text={todo.examples.meta_description_variants.join("\n")} />
+                          ) : null}
+                        </div>
+                        {renderListOrEmpty(todo.examples?.meta_description_variants)}
+                      </div>
+                    </div>
+
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <div className="text-xs font-semibold text-muted-foreground">H2 OUTLINE</div>
+                          {todo.examples?.h2_outline?.length ? (
+                            <CopyButton text={todo.examples.h2_outline.join("\n")} />
+                          ) : null}
+                        </div>
+                        {renderListOrEmpty(todo.examples?.h2_outline)}
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <div className="text-xs font-semibold text-muted-foreground">FAQ QUESTIONS</div>
+                          {todo.examples?.faq_questions?.length ? (
+                            <CopyButton text={todo.examples.faq_questions.join("\n")} />
+                          ) : null}
+                        </div>
+                        {renderListOrEmpty(todo.examples?.faq_questions)}
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div className="text-xs font-semibold text-muted-foreground">OUTREACH MESSAGE (JP)</div>
+                        {todo.examples?.outreach_message_draft_jp ? (
+                          <CopyButton text={todo.examples.outreach_message_draft_jp} />
+                        ) : null}
+                      </div>
+                      {todo.examples?.outreach_message_draft_jp ? (
+                        <pre className="mt-2 whitespace-pre-wrap rounded-[var(--r-md)] border p-3 text-xs bg-[rgba(var(--panel),0.06)] border-[rgba(var(--border),0.12)]">
+{todo.examples.outreach_message_draft_jp}
+                        </pre>
+                      ) : (
+                        <div className="text-xs text-muted-foreground">なし</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {tab === "evidence" && (
+                  <div className="space-y-3">
+                    <SectionTitle>EVIDENCE / 根拠</SectionTitle>
+                    {todo.evidence?.length ? (
+                      <ul className="mt-2 space-y-1">
+                        {todo.evidence.map((e, i) => (
+                          <li key={i} className="text-xs text-muted-foreground">• {e}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="text-xs text-muted-foreground">なし</div>
+                    )}
+                  </div>
+                )}
+              </GlassCard>
+            </div>
+          </div>
+        </GlassCard>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## I-4. TodoBoard Wiring（click → open modal）
+
+> TodoBoardに `onSelectTodo` を渡し、ResultViewでmodal state管理。
+
+```tsx
+// components/results/TodoBoardWithModal.tsx
+"use client";
+
+import * as React from "react";
+import type { Diagnosis, Todo } from "@/lib/api/types";
+import { TodoBoard } from "@/components/results/TodoBoard";
+import { TodoDetailModal } from "@/components/results/TodoDetailModal";
+
+export function TodoBoardWithModal({ todos }: { todos: Todo[] }) {
+  const [open, setOpen] = React.useState(false);
+  const [selected, setSelected] = React.useState<Todo | null>(null);
+
+  return (
+    <>
+      <TodoBoard
+        todos={todos}
+        onSelectTodo={(t) => {
+          setSelected(t);
+          setOpen(true);
+        }}
+      />
+      <TodoDetailModal open={open} onOpenChange={setOpen} todo={selected} />
+    </>
+  );
+}
+```
+
+---
+
+## I-5. (Optional) Micro-polish for "気持ちよさ"
+
+### I-5.1 Keyboard UX
+- `Escape`で閉じる（shadcn Dialog/Sheetなら自動）
+- Focus trap（同上）
+
+### I-5.2 Copy feedback
+- 本当は toast が最高（shadcn Sonner 等）
+- MVPはボタンが "Copied" に変わるだけでも十分
+
+### I-5.3 Evidence to Todo
+- ToDo詳細のevidence tabに、`Diagnosis.evidence`（全体根拠）もリンクできるとプロ感UP
+- 例：evidence文字列の一部一致で関連根拠を表示
+
+---
+
+## I-6. Acceptance Criteria
+
+### EvidenceDrawer
+- [ ] open/closeできる
+- [ ] 検索でフィルタできる
+- [ ] claim + support が読みやすいカードで並ぶ
+
+### TodoDetailModal
+- [ ] TodoCardクリックで開く
+- [ ] Steps/Examples/Evidence のタブ切替が可能
+- [ ] Copyボタンが機能し、Copied表示になる
+- [ ] title案/h2案/FAQ/依頼文がある場合にのみ表示される
+
+---
+
 ## 次のステップ（必要なら追記）
 さらに追加が有効なコンポーネント:
-- `EvidenceDrawer`: 根拠を気持ちよく見せるスライドパネル
-- `TodoDetailModal`: 例文・h2案・FAQ案を"コピーボタン付き"で表示
+- `RunProgressCard`: queued→running→done のアニメーション＋ステータス表示
+- `JobHistoryList`: 過去の分析ジョブ一覧

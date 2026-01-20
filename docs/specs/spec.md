@@ -3786,7 +3786,522 @@ export function TodoBoardWithModal({ todos }: { todos: Todo[] }) {
 
 ---
 
+# Appendix J: Run Screen Progress UX (queued → running → done)
+
+**Target**: Next.js + Tailwind + lucide-react
+
+**Goal**:
+- "実行中"が気持ちよく伝わる（プロダクト感UP）
+- queued/running/done/failed を視覚的に表現
+- doneになったら「結果へ」導線が強く出る
+- pollingは軽量（2〜3秒間隔、上限タイムアウトあり）
+
+**Includes**:
+- `components/run/JobStatusCard.tsx`（メイン）
+- `components/run/ProgressSteps.tsx`（ステップUI）
+- `components/run/StatusPulse.tsx`（ネオンパルス）
+- `components/run/useJobPoll.ts`（polling hook）
+- wiring example (Run page)
+
+---
+
+## J-1. StatusPulse Component
+
+> "動いてる感"の最小エッセンス。眩しすぎないネオンパルス。
+
+```tsx
+// components/run/StatusPulse.tsx
+import * as React from "react";
+import { cn } from "@/lib/utils/cn";
+
+export interface StatusPulseProps {
+  tone?: "cyan" | "violet" | "amber" | "rose";
+  className?: string;
+}
+
+export function StatusPulse({ tone = "cyan", className }: StatusPulseProps) {
+  const color =
+    tone === "violet"
+      ? "rgba(var(--violet),0.95)"
+      : tone === "amber"
+      ? "rgba(var(--amber),0.95)"
+      : tone === "rose"
+      ? "rgba(var(--rose),0.95)"
+      : "rgba(var(--cyan),0.95)";
+
+  return (
+    <span className={cn("relative inline-flex h-2.5 w-2.5", className)}>
+      <span
+        className="absolute inline-flex h-full w-full rounded-full animate-ping opacity-60"
+        style={{ background: color }}
+      />
+      <span className="relative inline-flex h-2.5 w-2.5 rounded-full" style={{ background: color }} />
+    </span>
+  );
+}
+```
+
+---
+
+## J-2. ProgressSteps Component
+
+> queued → running → done を "3ステップ" で分かりやすく。
+> runningは中央ステップが強調される。
+
+```tsx
+// components/run/ProgressSteps.tsx
+import * as React from "react";
+import { cn } from "@/lib/utils/cn";
+import type { JobStatus } from "@/lib/api/types";
+import { Check } from "lucide-react";
+
+export interface ProgressStepsProps {
+  status: JobStatus;
+}
+
+function stepState(status: JobStatus, step: 0 | 1 | 2) {
+  // 0: queued, 1: running, 2: done
+  if (status === "failed") return "failed";
+  if (status === "queued") return step === 0 ? "active" : "idle";
+  if (status === "running") return step <= 1 ? (step === 1 ? "active" : "done") : "idle";
+  if (status === "done") return "done";
+  return "idle";
+}
+
+export function ProgressSteps({ status }: ProgressStepsProps) {
+  const steps = [
+    { key: 0 as const, label: "QUEUED", sub: "準備中" },
+    { key: 1 as const, label: "RUNNING", sub: "解析実行中" },
+    { key: 2 as const, label: "DONE", sub: "完了" }
+  ];
+
+  return (
+    <div className="grid gap-3">
+      <div className="grid grid-cols-3 gap-3">
+        {steps.map((s) => {
+          const st = stepState(status, s.key);
+          const isActive = st === "active";
+          const isDone = st === "done";
+          const isFailed = status === "failed";
+
+          const border = isFailed
+            ? "rgba(var(--rose),0.25)"
+            : isActive
+            ? "rgba(var(--cyan),0.28)"
+            : "rgba(var(--border),0.12)";
+          const bg = isFailed
+            ? "rgba(var(--rose),0.10)"
+            : isActive
+            ? "rgba(var(--cyan),0.10)"
+            : "rgba(var(--panel),0.06)";
+
+          return (
+            <div
+              key={s.key}
+              className={cn(
+                "rounded-[var(--r-md)] border px-3 py-3",
+                "transition-all duration-200 ease-out"
+              )}
+              style={{ borderColor: border, background: bg }}
+            >
+              <div className="flex items-center justify-between">
+                <div className="text-[10px] font-semibold tracking-[0.18em] uppercase">
+                  {s.label}
+                </div>
+                {isDone && !isFailed ? (
+                  <span className="inline-flex items-center justify-center rounded-full border px-2 py-0.5 text-[10px]"
+                        style={{ borderColor: "rgba(var(--lime),0.22)", background: "rgba(var(--lime),0.08)", color: "rgba(var(--lime),0.95)" }}>
+                    <Check className="mr-1 h-3 w-3" />
+                    OK
+                  </span>
+                ) : null}
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">{s.sub}</div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Status line */}
+      <div className="text-xs text-muted-foreground">
+        {status === "queued" && "キューに入りました。解析環境を準備しています。"}
+        {status === "running" && "解析中：HTML/構造/速度/比較/ToDo生成を実行しています。"}
+        {status === "done" && "完了：レポートが生成されました。結果画面へ移動できます。"}
+        {status === "failed" && "失敗：エラーが発生しました。URLやネットワーク、設定を確認してください。"}
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## J-3. useJobPoll Hook
+
+> job statusをポーリングで更新。done/failedで停止。
+> 2.5秒間隔＋上限（例: 10分）で安全。
+
+```ts
+// components/run/useJobPoll.ts
+"use client";
+
+import * as React from "react";
+import type { AnalysisJob, UUID } from "@/lib/api/types";
+import { getJob } from "@/lib/api/queries";
+
+export function useJobPoll(siteId: UUID, jobId: UUID | null, opts?: { intervalMs?: number; timeoutMs?: number }) {
+  const intervalMs = opts?.intervalMs ?? 2500;
+  const timeoutMs = opts?.timeoutMs ?? 10 * 60 * 1000;
+
+  const [job, setJob] = React.useState<AnalysisJob | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  const [isPolling, setIsPolling] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!jobId) return;
+
+    let alive = true;
+    let timer: any = null;
+    const started = Date.now();
+
+    const tick = async () => {
+      try {
+        setIsPolling(true);
+        const j = await getJob(siteId, jobId);
+        if (!alive) return;
+        setJob(j);
+        setError(null);
+
+        if (j.status === "done" || j.status === "failed") {
+          setIsPolling(false);
+          return; // stop
+        }
+        if (Date.now() - started > timeoutMs) {
+          setIsPolling(false);
+          setError("Polling timeout");
+          return;
+        }
+        timer = setTimeout(tick, intervalMs);
+      } catch (e: any) {
+        if (!alive) return;
+        setIsPolling(false);
+        setError(e?.message ?? "poll error");
+      }
+    };
+
+    tick();
+
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [siteId, jobId, intervalMs, timeoutMs]);
+
+  return { job, error, isPolling };
+}
+```
+
+---
+
+## J-4. JobStatusCard Component
+
+> "ステータスカード"がRun画面の主役。上品な発光＋状況に応じたCTA。
+> - running: パルス＋軽いスピナー
+> - done: 「View Result」ボタンが主ボタンになる
+> - failed: エラー表示 + retry導線
+
+```tsx
+// components/run/JobStatusCard.tsx
+"use client";
+
+import * as React from "react";
+import type { AnalysisJob, UUID } from "@/lib/api/types";
+import { GlassCard } from "@/components/layout/GlassCard";
+import { ProgressSteps } from "@/components/run/ProgressSteps";
+import { StatusPulse } from "@/components/run/StatusPulse";
+import { cn } from "@/lib/utils/cn";
+import { ArrowRight, RotateCcw, Loader2, AlertTriangle } from "lucide-react";
+
+export interface JobStatusCardProps {
+  job: AnalysisJob | null;
+  pollingError?: string | null;
+  isPolling?: boolean;
+
+  onViewResult?: () => void;
+  onRetry?: () => void;
+}
+
+function toneFromStatus(status?: AnalysisJob["status"]) {
+  if (status === "failed") return "rose" as const;
+  if (status === "running") return "cyan" as const;
+  if (status === "done") return "violet" as const;
+  return "amber" as const;
+}
+
+export function JobStatusCard({ job, pollingError, isPolling, onViewResult, onRetry }: JobStatusCardProps) {
+  const status = job?.status ?? "queued";
+  const tone = toneFromStatus(status);
+
+  const headerText =
+    status === "queued"
+      ? "JOB QUEUED / 準備中"
+      : status === "running"
+      ? "ANALYZING / 解析実行中"
+      : status === "done"
+      ? "COMPLETE / 完了"
+      : "FAILED / 失敗";
+
+  return (
+    <GlassCard glow={status === "running" ? "cyan" : status === "done" ? "violet" : "none"} className="p-5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-3">
+            <StatusPulse tone={tone} />
+            <div className="text-sm font-semibold tracking-tight">{headerText}</div>
+            {status === "running" ? (
+              <Loader2 className="h-4 w-4 animate-spin opacity-70" />
+            ) : null}
+          </div>
+          <div className="text-xs text-muted-foreground">
+            {job ? `job_id: ${job.job_id}` : "ジョブが開始されるとここに表示されます"}
+          </div>
+        </div>
+
+        {/* Right actions */}
+        <div className="flex items-center gap-2">
+          {status === "done" && onViewResult ? (
+            <button
+              type="button"
+              onClick={onViewResult}
+              className={cn(
+                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-xs font-semibold",
+                "border-[rgba(var(--violet),0.24)] bg-[rgba(var(--violet),0.10)]",
+                "hover:shadow-[0_0_0_1px_rgba(var(--violet),0.25),var(--glow-violet)] transition"
+              )}
+            >
+              View Result <ArrowRight className="h-4 w-4 opacity-80" />
+            </button>
+          ) : null}
+
+          {status === "failed" && onRetry ? (
+            <button
+              type="button"
+              onClick={onRetry}
+              className={cn(
+                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-xs font-semibold",
+                "border-[rgba(var(--rose),0.24)] bg-[rgba(var(--rose),0.10)]",
+                "hover:shadow-[0_0_0_1px_rgba(var(--rose),0.25)] transition"
+              )}
+            >
+              Retry <RotateCcw className="h-4 w-4 opacity-80" />
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="mt-4">
+        <ProgressSteps status={status} />
+      </div>
+
+      {(pollingError || job?.error_message) && (
+        <div className="mt-4 rounded-[var(--r-md)] border p-3 text-xs"
+             style={{ borderColor: "rgba(var(--rose),0.22)", background: "rgba(var(--rose),0.08)" }}>
+          <div className="flex items-center gap-2 font-semibold" style={{ color: "rgba(var(--rose),0.95)" }}>
+            <AlertTriangle className="h-4 w-4" /> Error
+          </div>
+          <div className="mt-1 text-muted-foreground">
+            {job?.error_message || pollingError}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-4 text-[10px] text-muted-foreground uppercase tracking-[0.18em]">
+        {isPolling ? "polling…" : "idle"}
+      </div>
+    </GlassCard>
+  );
+}
+```
+
+---
+
+## J-5. Run Screen Wiring Example
+
+> run画面で "Run" を押す → job_id発行 → polling開始 → doneで結果ページに誘導。
+
+### J-5.1 Backend small tweak (recommended)
+
+- `GET /analysis-jobs/{job_id}` response に `result_id?: UUID` を追加（status==done時）
+- DB: `analysis_results.job_id` を参照して1件取得
+
+### J-5.2 Front code (skeleton)
+
+```tsx
+// app/sites/[siteId]/run/RunScreen.tsx
+"use client";
+
+import * as React from "react";
+import { useRouter } from "next/navigation";
+import type { UUID, AnalysisJobTarget } from "@/lib/api/types";
+import { createAnalysisJob } from "@/lib/api/queries";
+import { useJobPoll } from "@/components/run/useJobPoll";
+import { JobStatusCard } from "@/components/run/JobStatusCard";
+import { RunConfigCard } from "@/components/run/RunConfigCard";
+import { TargetSummaryCard } from "@/components/run/TargetSummaryCard";
+
+export function RunScreen({
+  siteId,
+  targets
+}: {
+  siteId: UUID;
+  targets: {
+    official: any;
+    competitors: any[];
+    thirdParties: any[];
+    apiTargets: AnalysisJobTarget[];
+  };
+}) {
+  const router = useRouter();
+
+  const [jobId, setJobId] = React.useState<UUID | null>(null);
+  const { job, error, isPolling } = useJobPoll(siteId, jobId);
+
+  // Config states (MVP defaults)
+  const [device, setDevice] = React.useState<"mobile" | "desktop">("mobile");
+  const [enablePagespeed, setEnablePagespeed] = React.useState(true);
+  const [enableGsc, setEnableGsc] = React.useState(false);
+  const [gscProperty, setGscProperty] = React.useState("");
+  const [brandTerms, setBrandTerms] = React.useState<string[]>([]);
+  const [reportStyle, setReportStyle] = React.useState<"consultant" | "concise" | "technical">("consultant");
+
+  const [running, setRunning] = React.useState(false);
+
+  const onRun = async () => {
+    setRunning(true);
+    try {
+      const res = await createAnalysisJob(siteId, {
+        device,
+        locale: "ja-JP",
+        target_country: "JP",
+        enable_pagespeed: enablePagespeed,
+        enable_gsc: enableGsc,
+        enable_ai_report: true,
+        gsc_property: enableGsc ? gscProperty : undefined,
+        brand_terms: brandTerms,
+        targets: targets.apiTargets
+      });
+      setJobId(res.job_id);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const onViewResult = () => {
+    // If backend provides job.result_id, navigate directly:
+    // router.push(`/sites/${siteId}/results/${job.result_id}`);
+    router.push(`/sites/${siteId}/results`); // fallback
+  };
+
+  const onRetry = () => {
+    setJobId(null);
+  };
+
+  return (
+    <div className="grid gap-6 lg:grid-cols-2">
+      <div className="space-y-6">
+        <RunConfigCard
+          device={device}
+          onDeviceChange={setDevice}
+          enablePagespeed={enablePagespeed}
+          onEnablePagespeed={setEnablePagespeed}
+          enableGsc={enableGsc}
+          onEnableGsc={setEnableGsc}
+          gscProperty={gscProperty}
+          onGscProperty={setGscProperty}
+          brandTerms={brandTerms}
+          onBrandTerms={setBrandTerms}
+          reportStyle={reportStyle}
+          onReportStyle={setReportStyle}
+        />
+
+        <button
+          type="button"
+          onClick={onRun}
+          disabled={running || !targets.official || targets.competitors.length !== 2}
+          className="w-full rounded-[var(--r-lg)] border px-5 py-4 text-sm font-semibold tracking-wide
+                     border-[rgba(var(--cyan),0.22)] bg-[rgba(var(--cyan),0.10)]
+                     hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.25),var(--glow-cyan)] transition
+                     disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {running ? "Launching…" : "RUN DIAGNOSTIC"}
+        </button>
+
+        <JobStatusCard
+          job={job}
+          pollingError={error}
+          isPolling={isPolling}
+          onViewResult={job?.status === "done" ? onViewResult : undefined}
+          onRetry={job?.status === "failed" ? onRetry : undefined}
+        />
+      </div>
+
+      <div className="space-y-6">
+        <TargetSummaryCard
+          official={targets.official}
+          competitors={targets.competitors}
+          thirdParties={targets.thirdParties}
+        />
+
+        <div className="rounded-[var(--r-lg)] border p-5 bg-[rgba(var(--panel),0.06)] border-[rgba(var(--border),0.12)]">
+          <div className="text-sm font-semibold">WHAT'S RUNNING</div>
+          <ul className="mt-2 space-y-1 text-sm text-muted-foreground">
+            <li>• HTML/見出し構造/リンク/構造化データ</li>
+            <li>• 速度（PageSpeed）</li>
+            <li>• 競合との差分（構造・訴求・技術）</li>
+            <li>• 対策ToDo（P0/P1/P2）＋レポート生成</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## J-6. Micro-animations (Optional but high impact)
+
+> Tailwindだけで十分。派手すぎず"動いてる感"。
+
+### J-6.1 Add utility animations in globals.css
+
+```css
+@keyframes floatUp {
+  0% { transform: translateY(0); opacity: 0.7; }
+  100% { transform: translateY(-6px); opacity: 1; }
+}
+.float-up {
+  animation: floatUp 220ms ease-out;
+}
+```
+
+**Usage**: status changes時に header text container に `float-up` を追加
+
+---
+
+## J-7. Acceptance Criteria
+
+- [ ] Runボタン押下で job作成→ status card が表示される
+- [ ] queued → running → done が3ステップUIで分かる
+- [ ] running中に "パルス + スピナー" が表示される
+- [ ] doneで "View Result" CTA が目立つ
+- [ ] failedでエラーメッセージ + Retryが出る
+- [ ] pollingはdone/failedで停止し、timeoutもある
+
+---
+
 ## 次のステップ（必要なら追記）
 さらに追加が有効なコンポーネント:
-- `RunProgressCard`: queued→running→done のアニメーション＋ステータス表示
+- `RunConfigCard`: device/pagespeed/GSC設定UI
+- `TargetSummaryCard`: 対象URL一覧表示
 - `JobHistoryList`: 過去の分析ジョブ一覧

@@ -1,0 +1,116 @@
+app:
+  schema_version: "0.1"
+  max_queries_per_url: 20
+  max_todos_total: 15
+  max_todos_per_priority: 5
+  default_locale: "ja-JP"
+  default_country: "JP"
+  default_device: "mobile"
+  time_windows_days:
+    short: 7
+    long: 28
+
+technical:
+  require_status_code: 200
+  noindex_keywords:
+    - "noindex"
+  canonical_must_exist: true
+
+  mobile_friendly:
+    viewport_required: true
+
+  pagespeed:
+    score:
+      A_min: 85
+      B_min: 70
+      C_min: 50
+      D_max: 49
+    lcp_ms:
+      good_max: 2500
+      needs_improvement_max: 4000
+    inp_ms:
+      good_max: 200
+      needs_improvement_max: 500
+    cls:
+      good_max: 0.1
+      needs_improvement_max: 0.25
+
+content:
+  official_intent_items:
+    - "overview"
+    - "activities"
+    - "works_or_history"
+    - "media_gallery"
+    - "cta_contact"
+    - "faq"
+    - "region"
+    - "team_or_operator"
+    - "freshness"
+    - "audience_branch"
+
+  official_grade:
+    A_min: 9
+    B_min: 7
+    C_min: 5
+    D_max: 4
+
+  third_party_intent_items:
+    - "brand_clear"
+    - "description_depth"
+    - "unique_points"
+    - "region_or_genre"
+    - "official_link"
+    - "cta_present"
+
+  third_party_grade:
+    A_min: 6
+    B_min: 5
+    C_min: 3
+    D_max: 2
+
+  text_rules:
+    third_party_min_chars: 200
+    alt_ratio_good_min: 0.70
+
+ctr:
+  opportunity:
+    min_impressions_1: 300
+    min_impressions_2: 500
+    pos_max_1: 10
+    pos_max_2: 5
+    ctr_low_ratio_to_median: 0.5
+    ctr_hard_low: 0.03
+
+  grade:
+    A_max_opportunity_ratio: 0.10
+    B_max_opportunity_ratio: 0.20
+    C_max_opportunity_ratio: 0.35
+    D_min_opportunity_ratio: 0.35
+
+comparisons:
+  h2_delta_content_strong: -5
+  missing_intent_items_strong_min: 3
+  faq_schema_delta_strong: -1
+  pagespeed_delta_strong: -15
+
+todos:
+  P0:
+    - "indexing_critical"
+    - "ctr_high_opportunity"
+    - "core_sections_missing"
+    - "official_link_missing_on_third_party"
+  P1:
+    - "faq_addition"
+    - "intent_expansion"
+    - "schema_addition"
+    - "internal_linking_plan"
+  P2:
+    - "content_cluster"
+    - "deep_performance_optimization"
+    - "ongoing_outreach"
+
+ai:
+  report_style: "consultant"
+  language: "ja"
+  must_cite_evidence: true
+  no_guessing: true

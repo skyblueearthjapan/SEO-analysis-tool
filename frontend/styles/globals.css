@@ -1,0 +1,258 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================
+   Midnight Neon Theme Variables
+   ============================ */
+:root {
+  /* Base colors */
+  --color-bg-base: #0f1729;
+  --color-bg-surface: #1a2744;
+  --color-bg-elevated: #243351;
+
+  /* Accent colors */
+  --color-accent-cyan: #35D4FF;
+  --color-accent-violet: #A78BFA;
+  --color-accent-green: #4ADE80;
+  --color-accent-amber: #FBBF24;
+  --color-accent-red: #F87171;
+
+  /* Text colors */
+  --color-text-primary: #F1F5F9;
+  --color-text-secondary: #94A3B8;
+  --color-text-muted: #64748B;
+
+  /* Border / Glass */
+  --color-border: rgba(148, 163, 184, 0.15);
+  --color-glass-bg: rgba(26, 39, 68, 0.6);
+  --color-glass-border: rgba(53, 212, 255, 0.2);
+
+  /* Shadows */
+  --shadow-glow-cyan: 0 0 20px rgba(53, 212, 255, 0.15);
+  --shadow-glow-violet: 0 0 20px rgba(167, 139, 250, 0.15);
+
+  /* Fonts */
+  --font-body: "Noto Sans JP", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+}
+
+/* ============================
+   Base Layer
+   ============================ */
+@layer base {
+  body {
+    @apply bg-bg-base text-text-primary;
+    font-family: var(--font-body);
+    font-feature-settings: "palt" 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Monospace for metrics */
+  .font-mono {
+    font-family: var(--font-mono);
+  }
+
+  /* Japanese text optimization */
+  p, li, dd {
+    line-height: 1.8;
+    letter-spacing: 0.02em;
+  }
+
+  h1, h2, h3 {
+    font-feature-settings: "palt" 1;
+    letter-spacing: 0.04em;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: var(--color-bg-base);
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-text-muted);
+  }
+}
+
+/* ============================
+   Component Layer
+   ============================ */
+@layer components {
+  /* Glass Card */
+  .glass-card {
+    @apply rounded-2xl p-6;
+    background: var(--color-glass-bg);
+    border: 1px solid var(--color-glass-border);
+    backdrop-filter: blur(12px);
+    box-shadow: var(--shadow-glow-cyan);
+  }
+
+  .glass-card:hover {
+    border-color: rgba(53, 212, 255, 0.4);
+    box-shadow: 0 0 30px rgba(53, 212, 255, 0.2);
+  }
+
+  /* Score Badge */
+  .score-badge {
+    @apply inline-flex items-center justify-center rounded-full font-mono font-bold;
+  }
+
+  .score-badge-a {
+    @apply bg-emerald-500/20 text-emerald-400 border border-emerald-500/30;
+  }
+
+  .score-badge-b {
+    @apply bg-cyan-500/20 text-cyan-400 border border-cyan-500/30;
+  }
+
+  .score-badge-c {
+    @apply bg-amber-500/20 text-amber-400 border border-amber-500/30;
+  }
+
+  .score-badge-d {
+    @apply bg-red-500/20 text-red-400 border border-red-500/30;
+  }
+
+  /* Priority Tags */
+  .priority-tag {
+    @apply text-xs font-mono font-bold px-2 py-0.5 rounded;
+  }
+
+  .priority-p0 {
+    @apply bg-red-500/20 text-red-400;
+  }
+
+  .priority-p1 {
+    @apply bg-amber-500/20 text-amber-400;
+  }
+
+  .priority-p2 {
+    @apply bg-slate-500/20 text-slate-400;
+  }
+
+  /* Main Cause Badge */
+  .cause-badge {
+    @apply inline-flex items-center px-3 py-1 rounded-full text-sm font-medium;
+  }
+
+  .cause-content {
+    @apply bg-blue-500/20 text-blue-400 border border-blue-500/30;
+  }
+
+  .cause-technical {
+    @apply bg-orange-500/20 text-orange-400 border border-orange-500/30;
+  }
+
+  .cause-ctr {
+    @apply bg-purple-500/20 text-purple-400 border border-purple-500/30;
+  }
+
+  .cause-mixed {
+    @apply bg-gray-500/20 text-gray-400 border border-gray-500/30;
+  }
+
+  /* Button Styles */
+  .btn-primary {
+    @apply px-4 py-2 rounded-lg font-medium transition-all;
+    @apply bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30;
+    @apply hover:bg-accent-cyan/30 hover:border-accent-cyan/50;
+    @apply hover:shadow-glow-cyan;
+  }
+
+  .btn-secondary {
+    @apply px-4 py-2 rounded-lg font-medium transition-all;
+    @apply bg-bg-elevated text-text-secondary border border-[var(--color-border)];
+    @apply hover:text-text-primary hover:border-accent-violet/30;
+  }
+
+  /* Input Styles */
+  .input-base {
+    @apply w-full px-4 py-2 rounded-lg;
+    @apply bg-bg-surface text-text-primary;
+    @apply border border-[var(--color-border)];
+    @apply focus:outline-none focus:border-accent-cyan/50 focus:ring-1 focus:ring-accent-cyan/30;
+    @apply placeholder:text-text-muted;
+  }
+}
+
+/* ============================
+   Markdown Styles
+   ============================ */
+.markdown-content {
+  @apply text-text-primary leading-relaxed;
+}
+
+.markdown-content h1 {
+  @apply text-2xl font-bold mt-8 mb-4 text-text-primary;
+}
+
+.markdown-content h2 {
+  @apply text-xl font-semibold mt-6 mb-3 text-text-primary border-b border-[var(--color-border)] pb-2;
+}
+
+.markdown-content h3 {
+  @apply text-lg font-medium mt-4 mb-2 text-text-primary;
+}
+
+.markdown-content p {
+  @apply mb-4;
+}
+
+.markdown-content ul, .markdown-content ol {
+  @apply mb-4 pl-6;
+}
+
+.markdown-content li {
+  @apply mb-2;
+}
+
+.markdown-content ul li {
+  @apply list-disc;
+}
+
+.markdown-content ol li {
+  @apply list-decimal;
+}
+
+.markdown-content code {
+  @apply font-mono text-sm bg-bg-surface px-1 py-0.5 rounded;
+}
+
+.markdown-content pre {
+  @apply bg-bg-surface p-4 rounded-lg overflow-x-auto mb-4;
+}
+
+.markdown-content pre code {
+  @apply bg-transparent p-0;
+}
+
+.markdown-content table {
+  @apply w-full border-collapse mb-4;
+}
+
+.markdown-content th, .markdown-content td {
+  @apply border border-[var(--color-border)] px-4 py-2 text-left;
+}
+
+.markdown-content th {
+  @apply bg-bg-surface font-medium;
+}
+
+.markdown-content blockquote {
+  @apply border-l-4 border-accent-cyan/50 pl-4 italic text-text-secondary my-4;
+}
+
+.markdown-content a {
+  @apply text-accent-cyan hover:underline;
+}

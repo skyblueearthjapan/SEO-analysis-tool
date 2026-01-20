@@ -7092,7 +7092,582 @@ const [open, setOpen] = useState(false);
 
 ---
 
+# Appendix Q: PageCreateFlow Improvements (URL登録体験の強化)
+
+**Scope**:
+- URL登録体験を "気持ちよく" しつつ事故率を下げる
+- MVPで効果が大きい3点に絞る
+  1) page_type 推定（公式/競合/紹介）
+  2) 重複チェック（同一URL/同一ドメインの警告）
+  3) 初回クロール preview（任意・軽量）: title / h1 / canonical / robots だけ
+
+**Target**:
+- Next.js App Router
+- Tailwind
+- lucide-react
+- API: existing POST /pages + optional POST /pages/preview
+
+---
+
+## Q-0. 追加する画面/機能の位置
+
+対象: `/sites/[siteId]/pages` の URL追加フロー（UrlAddModal）
+
+- 既存: `<UrlAddModal />` がある前提
+- 改良: `<UrlAddModalV2 />` として差し替え可能
+
+---
+
+## Q-1. 新API（推奨・軽量preview）
+
+### Q-1.1 Backend (recommended)
+
+`POST /sites/{site_id}/pages:preview`
+
+**Request**:
+```json
+{ "url": "https://example.com" }
+```
+
+**Response**:
+```json
+{
+  "url": "https://example.com",
+  "ok": true,
+  "http_status": 200,
+  "final_url": "https://example.com/",
+  "title": "…",
+  "h1": "…",
+  "canonical": "…",
+  "robots_meta": "index,follow",
+  "noindex_detected": false,
+  "has_structured_data": true,
+  "fetched_at": "2026-01-20T00:00:00Z",
+  "error": null
+}
+```
+
+### Q-1.2 Why preview is worth it (MVP)
+- URLの取り違えを即座に発見（別ページを入れた等）
+- noindex / canonical違いの "地雷" を登録前に気付ける
+- 実装コストは低い（requests + BeautifulSoupでtitle/h1/canonical/robots）
+
+---
+
+## Q-2. Types + Queries
+
+### Q-2.1 Types (lib/api/types.ts)
+
+```ts
+export interface PagePreview {
+  url: string;
+  ok: boolean;
+  http_status?: number | null;
+  final_url?: string | null;
+
+  title?: string | null;
+  h1?: string | null;
+  canonical?: string | null;
+  robots_meta?: string | null;
+  noindex_detected?: boolean | null;
+  has_structured_data?: boolean | null;
+
+  fetched_at?: string | null;
+  error?: string | null;
+}
+```
+
+### Q-2.2 Routes (lib/api/routes.ts)
+
+```ts
+pagesPreview: (siteId: UUID) => `/sites/${siteId}/pages:preview`,
+```
+
+### Q-2.3 Queries (lib/api/queries.ts)
+
+```ts
+import type { UUID, PagePreview } from "./types";
+import { apiFetch } from "./client";
+import { routes } from "./routes";
+
+export async function previewPage(siteId: UUID, url: string): Promise<PagePreview> {
+  return apiFetch(routes.pagesPreview(siteId), {
+    method: "POST",
+    body: JSON.stringify({ url })
+  });
+}
+```
+
+---
+
+## Q-3. page_type 推定ロジック（フロント側）
+
+### Q-3.1 Rule (MVP)
+- **公式**: siteの "official domain" と同一ドメインなら official を候補に（ただし official は1つだけ）
+- **競合**: competitor は "公式と別ドメイン" かつ "同カテゴリっぽい" はMVPでは推定しない（別ドメインなら competitor候補）
+- **紹介**: third-party は pathに /profile /team /directory 等がある場合は候補
+
+※ 推定は "候補表示" に留め、最終決定はユーザーに委ねる（事故防止）
+
+### Q-3.2 helpers (lib/pages/guess.ts)
+
+```ts
+import type { PageType } from "@/lib/api/types";
+
+function getHostname(url: string) {
+  try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return ""; }
+}
+
+export function guessPageType(args: {
+  url: string;
+  officialDomain?: string | null; // from existing official url (if any)
+  officialExists: boolean;
+}): { guess: PageType; reason: string } {
+  const host = getHostname(args.url);
+  const off = args.officialDomain ? args.officialDomain.replace(/^www\./, "") : null;
+
+  // If no official yet, first URL tends to be official
+  if (!args.officialExists) {
+    return { guess: "official_homepage", reason: "公式が未登録のため候補を公式にしました" };
+  }
+
+  if (off && host === off) {
+    return { guess: "official_homepage", reason: "公式と同一ドメインのため" };
+  }
+
+  // Heuristic for third-party paths
+  const u = args.url.toLowerCase();
+  if (/(profile|directory|listing|companies|team|circle|group|theater|gekidan)/.test(u)) {
+    return { guess: "third_party_profile_page", reason: "掲載/一覧/プロフィール系のURLパターンのため" };
+  }
+
+  return { guess: "competitor_page", reason: "公式と別ドメインのため（競合候補）" };
+}
+```
+
+---
+
+## Q-4. Duplicate check / Warnings
+
+### Q-4.1 Rules
+- **完全一致のURLが既に存在** → error（登録不可）
+- **同一ホストが既に存在**
+  - competitorとして同一ホスト2件以上 → warning（同じサイトの別ページを競合にしていないか）
+  - officialと同一ホストを competitor にしようとしている → warning（タイプ見直し）
+
+### Q-4.2 helpers (lib/pages/validate.ts)
+
+```ts
+import type { Page } from "@/lib/api/types";
+
+function norm(u: string) { return u.trim(); }
+function host(u: string) {
+  try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return ""; }
+}
+
+export function validateNewUrl(args: {
+  url: string;
+  pageType: "official_homepage" | "competitor_page" | "third_party_profile_page";
+  existing: Page[];
+}) {
+  const urlN = norm(args.url);
+  const hostN = host(urlN);
+
+  const existingUrls = new Set(args.existing.map(p => norm(p.url)));
+  if (existingUrls.has(urlN)) {
+    return { ok: false, error: "同じURLが既に登録されています", warnings: [] as string[] };
+  }
+
+  const warnings: string[] = [];
+
+  const official = args.existing.find(p => p.page_type === "official_homepage");
+  const officialHost = official ? host(official.url) : null;
+
+  if (officialHost && hostN === officialHost && args.pageType === "competitor_page") {
+    warnings.push("公式と同一ドメインです。ページタイプが競合で正しいか確認してください。");
+  }
+
+  const sameHostCompetitors = args.existing.filter(p => p.page_type === "competitor_page" && host(p.url) === hostN);
+  if (args.pageType === "competitor_page" && sameHostCompetitors.length >= 1) {
+    warnings.push("競合が同一ドメインで複数件になります。別競合のURLか確認してください。");
+  }
+
+  return { ok: true, error: null as string | null, warnings };
+}
+```
+
+---
+
+## Q-5. UrlAddModalV2（UI + 状態管理 + API接続）
+
+### Q-5.1 Props
+
+```ts
+// components/pages/UrlAddModalV2.types.ts
+import type { Page, PageType, UUID } from "@/lib/api/types";
+
+export interface UrlAddModalV2Props {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+
+  siteId: UUID;
+  existingPages: Page[];
+
+  onCreated?: (page: Page) => void;
+}
+```
+
+### Q-5.2 Implementation
+
+```tsx
+// components/pages/UrlAddModalV2.tsx
+"use client";
+
+import * as React from "react";
+import type { UrlAddModalV2Props } from "./UrlAddModalV2.types";
+import type { PageType } from "@/lib/api/types";
+import { GlassCard } from "@/components/layout/GlassCard";
+import { cn } from "@/lib/utils/cn";
+import { createPage, previewPage } from "@/lib/api/queries";
+import { guessPageType } from "@/lib/pages/guess";
+import { validateNewUrl } from "@/lib/pages/validate";
+import { normalizeUrl, isValidHttpUrl } from "@/lib/utils/url";
+import { X, Sparkles, Eye, AlertTriangle, CheckCircle2 } from "lucide-react";
+
+const PAGE_TYPES: { value: PageType; label: string }[] = [
+  { value: "official_homepage", label: "公式ホームページ" },
+  { value: "competitor_page", label: "競合ページ" },
+  { value: "third_party_profile_page", label: "紹介・掲載ページ" }
+];
+
+export function UrlAddModalV2({
+  open,
+  onOpenChange,
+  siteId,
+  existingPages,
+  onCreated
+}: UrlAddModalV2Props) {
+  const [url, setUrl] = React.useState("");
+  const [label, setLabel] = React.useState("");
+  const [pageType, setPageType] = React.useState<PageType>("competitor_page");
+
+  const [guessReason, setGuessReason] = React.useState<string | null>(null);
+
+  const [warnings, setWarnings] = React.useState<string[]>([]);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const [previewing, setPreviewing] = React.useState(false);
+  const [preview, setPreview] = React.useState<any>(null);
+
+  const [creating, setCreating] = React.useState(false);
+
+  const official = existingPages.find(p => p.page_type === "official_homepage");
+  const officialDomain = official ? new URL(official.url).hostname.replace(/^www\./, "") : null;
+  const officialExists = !!official;
+
+  React.useEffect(() => {
+    if (!open) return;
+    setUrl("");
+    setLabel("");
+    setWarnings([]);
+    setError(null);
+    setPreview(null);
+    setPreviewing(false);
+    setCreating(false);
+
+    // initial guess
+    const g = guessPageType({ url: "https://", officialDomain, officialExists });
+    setPageType(g.guess);
+    setGuessReason(g.reason);
+  }, [open]);
+
+  if (!open) return null;
+
+  const urlN = normalizeUrl(url);
+
+  const runGuess = (u: string) => {
+    const g = guessPageType({ url: u, officialDomain, officialExists });
+    setPageType(g.guess);
+    setGuessReason(g.reason);
+  };
+
+  const runValidate = (u: string, pt: PageType) => {
+    setError(null);
+    if (!u.trim()) {
+      setWarnings([]);
+      return;
+    }
+    if (!isValidHttpUrl(u)) {
+      setError("URLが正しくありません（http/https）");
+      setWarnings([]);
+      return;
+    }
+    const v = validateNewUrl({ url: u, pageType: pt, existing: existingPages });
+    if (!v.ok) {
+      setError(v.error);
+      setWarnings([]);
+      return;
+    }
+    setWarnings(v.warnings);
+  };
+
+  const doPreview = async () => {
+    setError(null);
+    if (!urlN || !isValidHttpUrl(urlN)) {
+      setError("プレビュー前に正しいURLを入力してください（http/https）");
+      return;
+    }
+    setPreviewing(true);
+    try {
+      const res = await previewPage(siteId, urlN);
+      setPreview(res);
+      // Also surface noindex as warning
+      const w: string[] = [];
+      if (res?.noindex_detected) w.push("noindex が検出されました（検索に載らない可能性）");
+      if (res?.canonical && res?.final_url && res.canonical !== res.final_url) {
+        w.push("canonical が別URLを指しています（評価が別URLに集約される可能性）");
+      }
+      setWarnings((prev) => [...prev, ...w].slice(0, 6));
+    } catch (e: any) {
+      setError(e?.message ?? "プレビューに失敗しました");
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
+  const canCreate = !creating && !!urlN && isValidHttpUrl(urlN) && !error;
+
+  const doCreate = async () => {
+    setError(null);
+    runValidate(urlN, pageType);
+    if (!isValidHttpUrl(urlN)) return;
+
+    // hard block on duplicate
+    const v = validateNewUrl({ url: urlN, pageType, existing: existingPages });
+    if (!v.ok) {
+      setError(v.error);
+      return;
+    }
+
+    setCreating(true);
+    try {
+      const created = await createPage(siteId, {
+        url: urlN,
+        label: label.trim() ? label.trim() : null,
+        page_type: pageType
+      });
+      onCreated?.(created);
+      onOpenChange(false);
+    } catch (e: any) {
+      setError(e?.message ?? "作成に失敗しました");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50">
+      <div className="absolute inset-0 bg-black/60" onClick={() => onOpenChange(false)} />
+      <div className="absolute left-1/2 top-1/2 w-[min(640px,calc(100%-24px))] -translate-x-1/2 -translate-y-1/2 p-2">
+        <GlassCard className="p-5">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold tracking-tight">ADD URL / URL追加</div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                page_type推定・重複チェック・プレビューで事故を防ぎます
+              </div>
+            </div>
+            <button
+              type="button"
+              className="rounded-full border px-3 py-2 text-xs
+                         border-[rgba(var(--border),0.14)] bg-[rgba(var(--panel),0.06)]
+                         hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.18)] transition"
+              onClick={() => onOpenChange(false)}
+            >
+              <X className="h-4 w-4 opacity-80" />
+            </button>
+          </div>
+
+          {/* URL */}
+          <div className="mt-5 space-y-2">
+            <div className="text-xs font-semibold text-muted-foreground">URL *</div>
+            <input
+              value={url}
+              onChange={(e) => {
+                const v = e.target.value;
+                setUrl(v);
+                const nn = normalizeUrl(v);
+                if (nn.startsWith("http")) runGuess(nn);
+                runValidate(nn, pageType);
+              }}
+              onBlur={() => {
+                const nn = normalizeUrl(url);
+                setUrl(nn);
+                runValidate(nn, pageType);
+              }}
+              placeholder="https://example.com/..."
+              className={cn(
+                "w-full rounded-[var(--r-md)] border px-3 py-2 text-sm outline-none",
+                "bg-[rgba(var(--panel),0.06)] border-[rgba(var(--border),0.12)]",
+                error && "border-[rgba(var(--rose),0.35)]"
+              )}
+            />
+
+            {guessReason ? (
+              <div className="text-[11px] text-muted-foreground-2">
+                <span className="inline-flex items-center gap-2">
+                  <Sparkles className="h-4 w-4 opacity-70" />
+                  推定：{guessReason}
+                </span>
+              </div>
+            ) : null}
+          </div>
+
+          {/* Label */}
+          <div className="mt-4 space-y-2">
+            <div className="text-xs font-semibold text-muted-foreground">LABEL（任意）</div>
+            <input
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              placeholder="例：公式トップ / 劇団A / 掲載ページ"
+              className="w-full rounded-[var(--r-md)] border px-3 py-2 text-sm outline-none
+                         bg-[rgba(var(--panel),0.06)] border-[rgba(var(--border),0.12)]
+                         placeholder:text-[rgba(var(--fg),0.45)]"
+            />
+          </div>
+
+          {/* PageType */}
+          <div className="mt-4 space-y-2">
+            <div className="text-xs font-semibold text-muted-foreground">PAGE TYPE</div>
+            <div className="flex flex-wrap gap-2">
+              {PAGE_TYPES.map((t) => (
+                <button
+                  key={t.value}
+                  type="button"
+                  onClick={() => {
+                    setPageType(t.value);
+                    runValidate(urlN, t.value);
+                  }}
+                  className={cn(
+                    "rounded-full border px-3 py-2 text-xs",
+                    "border-[rgba(var(--border),0.14)] bg-[rgba(var(--panel),0.06)]",
+                    pageType === t.value && "shadow-[0_0_0_1px_rgba(var(--cyan),0.25),var(--glow-cyan)]"
+                  )}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Preview */}
+          <div className="mt-5 flex items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={doPreview}
+              disabled={previewing}
+              className="inline-flex items-center gap-2 rounded-full border px-4 py-2 text-xs
+                         border-[rgba(var(--violet),0.22)] bg-[rgba(var(--violet),0.10)]
+                         hover:shadow-[0_0_0_1px_rgba(var(--violet),0.22),var(--glow-violet)] transition
+                         disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Eye className="h-4 w-4 opacity-80" />
+              {previewing ? "Previewing…" : "Preview"}
+            </button>
+
+            <button
+              type="button"
+              onClick={doCreate}
+              disabled={!canCreate}
+              className="inline-flex items-center gap-2 rounded-full border px-4 py-2 text-xs font-semibold
+                         border-[rgba(var(--cyan),0.22)] bg-[rgba(var(--cyan),0.10)]
+                         hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.25),var(--glow-cyan)] transition
+                         disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <CheckCircle2 className="h-4 w-4 opacity-80" />
+              {creating ? "Creating…" : "Add URL"}
+            </button>
+          </div>
+
+          {/* Preview card */}
+          {preview ? (
+            <div className="mt-4 rounded-[var(--r-md)] border p-4 bg-[rgba(var(--panel),0.06)] border-[rgba(var(--border),0.12)]">
+              <div className="text-xs font-semibold text-muted-foreground">PREVIEW</div>
+              <div className="mt-2 space-y-1">
+                <div className="text-sm font-semibold">{preview.title || "—"}</div>
+                <div className="text-xs text-muted-foreground">H1: {preview.h1 || "—"}</div>
+                <div className="text-xs text-muted-foreground break-all">final_url: {preview.final_url || "—"}</div>
+                <div className="text-xs text-muted-foreground break-all">canonical: {preview.canonical || "—"}</div>
+                <div className="text-xs text-muted-foreground">robots: {preview.robots_meta || "—"}</div>
+              </div>
+            </div>
+          ) : null}
+
+          {/* Errors + warnings */}
+          {error ? (
+            <div className="mt-4 rounded-[var(--r-md)] border p-3 text-xs"
+                 style={{ borderColor: "rgba(var(--rose),0.22)", background: "rgba(var(--rose),0.08)" }}>
+              <div className="flex items-center gap-2 font-semibold" style={{ color: "rgba(var(--rose),0.95)" }}>
+                <AlertTriangle className="h-4 w-4" /> Error
+              </div>
+              <div className="mt-1 text-muted-foreground">{error}</div>
+            </div>
+          ) : null}
+
+          {warnings.length ? (
+            <div className="mt-3 rounded-[var(--r-md)] border p-3 text-xs
+                            border-[rgba(var(--amber),0.20)] bg-[rgba(var(--amber),0.08)]">
+              <div className="text-xs font-semibold" style={{ color: "rgba(var(--amber),0.95)" }}>
+                Warnings
+              </div>
+              <ul className="mt-1 space-y-1">
+                {warnings.map((w, i) => (
+                  <li key={i} className="text-xs text-muted-foreground">• {w}</li>
+                ))}
+              </ul>
+              <div className="mt-2 text-[11px] text-muted-foreground-2">
+                ※ Warnings は登録可能ですが、意図を再確認してください
+              </div>
+            </div>
+          ) : null}
+        </GlassCard>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## Q-6. Integration: Pages screen で差し替え
+
+```tsx
+// app/sites/[siteId]/pages/page.tsx（例・抜粋）
+const [open, setOpen] = useState(false);
+const [pages, setPages] = useState<Page[]>([]);
+
+<UrlAddModalV2
+  open={open}
+  onOpenChange={setOpen}
+  siteId={siteId}
+  existingPages={pages}
+  onCreated={(p) => setPages((prev) => [p, ...prev])}
+/>
+```
+
+---
+
+## Q-7. Acceptance Criteria
+
+- [ ] URL入力すると page_type 推定理由が出る
+- [ ] 既存URLと重複したら登録不可（Error）
+- [ ] 同一ドメイン競合などは Warning 表示
+- [ ] Previewで title/h1/canonical/robots が確認できる
+- [ ] Previewで noindex/canonical mismatch などを Warning に反映
+- [ ] Add URL で POST /pages が呼ばれ、一覧が更新される
+
+---
+
 ## 次のステップ（必要なら追記）
 さらに追加が有効なコンポーネント:
-- `PageCreateFlow`: URL登録体験の改善（page_type推定、duplicate check）
-- `EmptyStates`: 空状態・エラー状態のガイド
+- `EmptyStates`: URL未登録 / 競合不足 / GSC未連携 / 解析失敗のガイド

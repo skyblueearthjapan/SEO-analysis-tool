@@ -4526,9 +4526,437 @@ MVPの推定は簡易なので、次の段階で精度UPできます：
 
 ---
 
+# Appendix L: Chips → Checklist Morph (Running Task List)
+
+**Goal**:
+- Run前: EstimatedTasksRow（chipsで実行内容の要約）
+- Run後: 同じ場所が "Task Checklist" に変形（今どこまで終わったか）
+- queued/running/done/failed に応じて
+  - 未実行: idle
+  - 実行中: running（スピナー/パルス）
+  - 完了: done（チェック）
+  - 失敗: failed（警告）
+
+**Approach (MVP-friendly)**:
+- バックエンド側の詳細進捗が無い場合でも、フェーズ推定で十分"気持ちいい"
+- 余裕があれば後で `job.progress` をAPIで返して本物の進捗に差し替え可能
+
+**Includes**:
+- `lib/run/progress.ts` (phase mapping + task definitions)
+- `components/run/RunTasksMorph.tsx` (chips → checklist)
+- `components/run/TaskChecklist.tsx`
+- wiring snippet for RunScreen
+
+---
+
+## L-0. Progress Model (MVP)
+
+### L-0.1 JobStatus only (minimum)
+- queued / running / done / failed
+
+### L-0.2 Phase (derived locally)
+
+running の時、経過時間でフェーズ推定（*雰囲気でOK*）:
+- **phase0**: Fetch & parse HTML
+- **phase1**: PageSpeed (optional)
+- **phase2**: Comparisons & rule engine
+- **phase3**: AI report (optional)
+
+This makes the UI feel alive without backend changes.
+
+**Later upgrade**: backend returns `job.progress = {phase, tasks:[{id,status,detail}...]}`
+
+---
+
+## L-1. Progress Utilities（`lib/run/progress.ts`）
+
+> タスク定義と、job状態/経過時間→タスク状態を推定するロジック。
+> 推定時間は thresholds.yml の簡易推定と同じ思想でOK。
+
+```ts
+// lib/run/progress.ts
+import type { JobStatus } from "@/lib/api/types";
+
+export type TaskState = "idle" | "running" | "done" | "failed";
+
+export interface RunTask {
+  id: "fetch" | "structure" | "pagespeed" | "compare" | "todos" | "report";
+  label: string;
+  sub?: string;
+  enabled: boolean;
+}
+
+export function buildTasks(opts: {
+  urlCount: number;
+  enablePagespeed: boolean;
+  enableGsc: boolean; // reserved
+  enableAiReport: boolean;
+}): RunTask[] {
+  return [
+    { id: "fetch", label: "Fetch pages", sub: `${opts.urlCount} URLs`, enabled: true },
+    { id: "structure", label: "Parse structure", sub: "title / headings / links / schema", enabled: true },
+    { id: "pagespeed", label: "Run PageSpeed", sub: opts.enablePagespeed ? "enabled" : "skipped", enabled: opts.enablePagespeed },
+    { id: "compare", label: "Compare vs competitors", sub: "diff / gaps", enabled: true },
+    { id: "todos", label: "Generate ToDos", sub: "P0 / P1 / P2", enabled: true },
+    { id: "report", label: "Generate report", sub: opts.enableAiReport ? "AI enabled" : "skipped", enabled: opts.enableAiReport }
+  ].filter(t => t.enabled || t.id === "pagespeed" || t.id === "report"); // keep skipped visible if you want
+}
+
+/**
+ * Derive task states:
+ * - queued: all idle
+ * - failed: best-effort show running until fail, or mark all failed
+ * - done: all done (except skipped -> done/idle policy)
+ * - running: estimate phase by elapsed
+ */
+export function deriveTaskStates(args: {
+  jobStatus: JobStatus;
+  startedAt?: string | null;
+  nowIso?: string; // for testing
+  enablePagespeed: boolean;
+  enableAiReport: boolean;
+}): Record<RunTask["id"], TaskState> {
+  const now = args.nowIso ? new Date(args.nowIso).getTime() : Date.now();
+  const started = args.startedAt ? new Date(args.startedAt).getTime() : now;
+  const elapsed = Math.max(0, now - started);
+
+  const init: Record<RunTask["id"], TaskState> = {
+    fetch: "idle",
+    structure: "idle",
+    pagespeed: "idle",
+    compare: "idle",
+    todos: "idle",
+    report: "idle"
+  };
+
+  if (args.jobStatus === "queued") return init;
+
+  if (args.jobStatus === "failed") {
+    // Conservative: mark everything failed (or refine if backend provides phase)
+    return {
+      fetch: "failed",
+      structure: "failed",
+      pagespeed: args.enablePagespeed ? "failed" : "idle",
+      compare: "failed",
+      todos: "failed",
+      report: args.enableAiReport ? "failed" : "idle"
+    };
+  }
+
+  if (args.jobStatus === "done") {
+    return {
+      fetch: "done",
+      structure: "done",
+      pagespeed: args.enablePagespeed ? "done" : "done", // treat skipped as done for neatness
+      compare: "done",
+      todos: "done",
+      report: args.enableAiReport ? "done" : "done"
+    };
+  }
+
+  // running: phase estimate by elapsed buckets
+  // Tuned for "feels right" (not accuracy).
+  const t0 = 6_000;  // fetch
+  const t1 = 12_000; // parse
+  const t2 = args.enablePagespeed ? 28_000 : 14_000; // pagespeed optional
+  const t3 = (args.enablePagespeed ? 38_000 : 24_000); // compare+todos
+  const t4 = args.enableAiReport ? (args.enablePagespeed ? 55_000 : 40_000) : (args.enablePagespeed ? 45_000 : 30_000); // report optional
+
+  // Fetch
+  if (elapsed < t0) {
+    init.fetch = "running";
+    return init;
+  }
+  init.fetch = "done";
+
+  // Parse
+  if (elapsed < t1) {
+    init.structure = "running";
+    return init;
+  }
+  init.structure = "done";
+
+  // PageSpeed (optional)
+  if (args.enablePagespeed) {
+    if (elapsed < t2) {
+      init.pagespeed = "running";
+      return init;
+    }
+    init.pagespeed = "done";
+  } else {
+    init.pagespeed = "done"; // skipped but "done" for smooth UI
+  }
+
+  // Compare + ToDos
+  if (elapsed < t3) {
+    init.compare = "running";
+    return init;
+  }
+  init.compare = "done";
+
+  if (elapsed < t4) {
+    init.todos = "running";
+    return init;
+  }
+  init.todos = "done";
+
+  // Report
+  if (args.enableAiReport) {
+    init.report = "running";
+  } else {
+    init.report = "done";
+  }
+
+  return init;
+}
+```
+
+---
+
+## L-2. TaskChecklist Component
+
+> "今どこまで終わったか" を縦リストで気持ちよく。
+> 状態アイコン：idle(○) / running(spinner) / done(check) / failed(alert)
+
+```tsx
+// components/run/TaskChecklist.tsx
+"use client";
+
+import * as React from "react";
+import { cn } from "@/lib/utils/cn";
+import type { RunTask, TaskState } from "@/lib/run/progress";
+import { Check, Circle, Loader2, AlertTriangle } from "lucide-react";
+
+export interface TaskChecklistProps {
+  tasks: RunTask[];
+  states: Record<RunTask["id"], TaskState>;
+}
+
+function StateIcon({ state }: { state: TaskState }) {
+  if (state === "running") return <Loader2 className="h-4 w-4 animate-spin opacity-80" />;
+  if (state === "done") return <Check className="h-4 w-4" style={{ color: "rgba(var(--lime),0.95)" }} />;
+  if (state === "failed") return <AlertTriangle className="h-4 w-4" style={{ color: "rgba(var(--rose),0.95)" }} />;
+  return <Circle className="h-4 w-4 opacity-50" />;
+}
+
+export function TaskChecklist({ tasks, states }: TaskChecklistProps) {
+  return (
+    <div className="space-y-2">
+      {tasks.map((t) => {
+        const st = states[t.id];
+        const active = st === "running";
+        const done = st === "done";
+        const failed = st === "failed";
+
+        const border = failed
+          ? "rgba(var(--rose),0.20)"
+          : active
+          ? "rgba(var(--cyan),0.22)"
+          : "rgba(var(--border),0.12)";
+
+        const bg = failed
+          ? "rgba(var(--rose),0.08)"
+          : active
+          ? "rgba(var(--cyan),0.08)"
+          : "rgba(var(--panel),0.05)";
+
+        return (
+          <div
+            key={t.id}
+            className={cn(
+              "flex items-start gap-3 rounded-[var(--r-md)] border px-3 py-2",
+              "transition-all duration-200 ease-out"
+            )}
+            style={{ borderColor: border, background: bg }}
+          >
+            <div className="mt-0.5">
+              <StateIcon state={st} />
+            </div>
+            <div className="min-w-0">
+              <div className="text-xs font-semibold tracking-wide">
+                {t.label}
+                {done && <span className="ml-2 text-[10px] text-muted-foreground uppercase">done</span>}
+                {failed && <span className="ml-2 text-[10px] uppercase" style={{ color: "rgba(var(--rose),0.95)" }}>failed</span>}
+              </div>
+              <div className="text-xs text-muted-foreground-2 truncate">
+                {t.sub ?? ""}
+              </div>
+            </div>
+            <div className="ml-auto text-[10px] text-muted-foreground uppercase tracking-[0.18em]">
+              {st}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+```
+
+---
+
+## L-3. RunTasksMorph Component
+
+> 「押す前: chips」「押した後: checklist」に切り替えるコンテナ。
+> - jobIdが無い or status=queuedで未実行: chips
+> - running/done/failed: checklist
+> - doneなら小さく "View Result" ヒントを出す（主導線はJobStatusCardに任せる）
+
+```tsx
+// components/run/RunTasksMorph.tsx
+"use client";
+
+import * as React from "react";
+import type { AnalysisJob, DeviceType } from "@/lib/api/types";
+import { GlassCard } from "@/components/layout/GlassCard";
+import { EstimatedTasksRow } from "@/components/run/EstimatedTasksRow";
+import { TaskChecklist } from "@/components/run/TaskChecklist";
+import { buildTasks, deriveTaskStates } from "@/lib/run/progress";
+
+export interface RunTasksMorphProps {
+  job: AnalysisJob | null;
+  device: DeviceType;
+  enablePagespeed: boolean;
+  enableGsc: boolean;
+  enableAiReport: boolean;
+
+  urlCount: number;
+  competitorCount: number;
+  thirdPartyCount: number;
+}
+
+export function RunTasksMorph(props: RunTasksMorphProps) {
+  const { job } = props;
+  const status = job?.status;
+
+  const tasks = React.useMemo(
+    () =>
+      buildTasks({
+        urlCount: props.urlCount,
+        enablePagespeed: props.enablePagespeed,
+        enableGsc: props.enableGsc,
+        enableAiReport: props.enableAiReport
+      }),
+    [props.urlCount, props.enablePagespeed, props.enableGsc, props.enableAiReport]
+  );
+
+  const states = React.useMemo(
+    () =>
+      deriveTaskStates({
+        jobStatus: status ?? "queued",
+        startedAt: job?.started_at ?? null,
+        enablePagespeed: props.enablePagespeed,
+        enableAiReport: props.enableAiReport
+      }),
+    [status, job?.started_at, props.enablePagespeed, props.enableAiReport]
+  );
+
+  // Morph condition:
+  const showChecklist = !!job && (status === "running" || status === "done" || status === "failed");
+
+  return (
+    <GlassCard className="p-4">
+      <div className="flex items-center justify-between">
+        <div className="text-xs font-semibold tracking-wide text-muted-foreground">
+          {showChecklist ? "TASKS / 実行中" : "ESTIMATED TASKS / 実行内容"}
+        </div>
+        <div className="text-[10px] text-muted-foreground uppercase tracking-[0.18em]">
+          {showChecklist ? status : "preview"}
+        </div>
+      </div>
+
+      {!showChecklist ? (
+        <EstimatedTasksRow
+          urlCount={props.urlCount}
+          competitorCount={props.competitorCount}
+          thirdPartyCount={props.thirdPartyCount}
+          device={props.device}
+          enablePagespeed={props.enablePagespeed}
+          enableGsc={props.enableGsc}
+          enableAiReport={props.enableAiReport}
+        />
+      ) : (
+        <div className="mt-3">
+          <TaskChecklist tasks={tasks} states={states} />
+          {status === "done" ? (
+            <div className="mt-3 text-xs text-muted-foreground">
+              完了しました。右上の <span className="font-semibold">View Result</span> から結果へ進めます。
+            </div>
+          ) : null}
+        </div>
+      )}
+    </GlassCard>
+  );
+}
+```
+
+---
+
+## L-4. Wiring: RunScreen に組み込み（Runボタン直下）
+
+> "押す前のchips" は RunTasksMorph に統合されるため、以前の EstimatedTasksRow は置き換え。
+
+```tsx
+import { RunTasksMorph } from "@/components/run/RunTasksMorph";
+
+/* ...inside RunScreen return... */
+
+<button
+  type="button"
+  onClick={onRun}
+  disabled={running || !targets.official || targets.competitors.length !== 2}
+  className="w-full rounded-[var(--r-lg)] border px-5 py-4 text-sm font-semibold tracking-wide
+             border-[rgba(var(--cyan),0.22)] bg-[rgba(var(--cyan),0.10)]
+             hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.25),var(--glow-cyan)] transition
+             disabled:opacity-50 disabled:cursor-not-allowed"
+>
+  {running ? "Launching…" : "RUN DIAGNOSTIC"}
+</button>
+
+<RunTasksMorph
+  job={job}
+  device={device}
+  enablePagespeed={enablePagespeed}
+  enableGsc={enableGsc}
+  enableAiReport={true}
+  urlCount={1 + targets.competitors.length + targets.thirdParties.length}
+  competitorCount={targets.competitors.length}
+  thirdPartyCount={targets.thirdParties.length}
+/>
+```
+
+---
+
+## L-5. (Optional) Backend-driven Real Progress
+
+When ready, add in job response:
+
+```json
+"progress": {
+  "phase": "fetch|structure|pagespeed|compare|todos|report",
+  "tasks": [
+    {"id":"fetch","status":"done"},
+    {"id":"structure","status":"running"}
+  ]
+}
+```
+
+**Frontend change**: `deriveTaskStates()` を使わず、`job.progress.tasks` をそのまま states にマップ。
+
+---
+
+## L-6. Acceptance Criteria
+
+- [ ] job開始前: chips（Estimated tasks）が表示される
+- [ ] job開始後: 同じ位置が checklist に切り替わる（morph）
+- [ ] running中: どこが動いてるか一目で分かる（spinner）
+- [ ] done: 全チェック + 結果導線のヒントが出る
+- [ ] failed: failed表示で原因確認が促される
+
+---
+
 ## 次のステップ（必要なら追記）
 さらに追加が有効なコンポーネント:
 - `RunConfigCard`: device/pagespeed/GSC設定UI
 - `TargetSummaryCard`: 対象URL一覧表示
 - `JobHistoryList`: 過去の分析ジョブ一覧
-- 実行中タスクチェックリスト変形（chips → checklist）

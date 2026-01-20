@@ -105,6 +105,7 @@ export interface Todo {
   evidence: string[];
   impact: "high" | "medium" | "low";
   effort: "small" | "medium" | "large";
+  source_checks?: AnalysisCheckCode[];
   examples?: {
     title_variants?: string[];
     meta_description_variants?: string[];
@@ -132,4 +133,84 @@ export interface AnalysisResult {
 export interface Report {
   result_id: UUID;
   report_markdown: string;
+}
+
+// ============================================================
+// Analysis Checklist Types (Appendix V)
+// ============================================================
+
+export type AnalysisCheckStatus = "done" | "partial" | "skipped" | "not_supported";
+
+export type AnalysisCheckCode =
+  | "fetch"
+  | "html_basic"
+  | "headings"
+  | "text_stats"
+  | "links"
+  | "images_alt"
+  | "structured_data"
+  | "pagespeed"
+  | "search_console"
+  | "intent_coverage"
+  | "competitor_diff"
+  | "backlinks"
+  | "serp_rank"
+  | "keyword_research"
+  | "site_crawl"
+  | "log_analysis"
+  | "duplicate_cannibalization";
+
+export interface AnalysisCheckItem {
+  status: AnalysisCheckStatus;
+  notes: string[];
+  evidence_ids: string[];
+}
+
+export interface AnalysisChecks {
+  schema_version: string;
+  checks: Record<AnalysisCheckCode, AnalysisCheckItem>;
+}
+
+// ============================================================
+// Progress Tracking Types (Appendix AC)
+// ============================================================
+
+export interface ProgressMetrics {
+  pagespeed?: {
+    performance_score?: number | null;
+    lcp_ms?: number | null;
+    inp_ms?: number | null;
+    cls?: number | null;
+  };
+  content?: {
+    intent_missing_count?: number;
+    word_count?: number;
+    h2_count?: number;
+  };
+  schema?: {
+    has_faq?: boolean;
+    has_organization?: boolean;
+  };
+  gsc?: {
+    impressions?: number | null;
+    clicks?: number | null;
+    ctr?: number | null;
+    avg_position?: number | null;
+  };
+  todos?: {
+    total?: number;
+    done?: number;
+  };
+}
+
+export interface ProgressSnapshot {
+  id: UUID;
+  captured_at: string;
+  metrics: ProgressMetrics;
+}
+
+export interface ProgressComparison {
+  baseline: ProgressSnapshot | null;
+  current: ProgressSnapshot | null;
+  diff: Record<string, number> | null;
 }

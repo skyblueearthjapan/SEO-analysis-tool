@@ -96,6 +96,58 @@ class TargetRole(str, Enum):
     THIRD_PARTY = "third_party"
 
 
+class AnalysisCheckStatus(str, Enum):
+    """Analysis check execution status (Appendix V)"""
+    DONE = "done"
+    PARTIAL = "partial"
+    SKIPPED = "skipped"
+    NOT_SUPPORTED = "not_supported"
+
+
+class AnalysisCheckCode(str, Enum):
+    """Analysis check codes (Appendix V)"""
+    FETCH = "fetch"
+    HTML_BASIC = "html_basic"
+    HEADINGS = "headings"
+    TEXT_STATS = "text_stats"
+    LINKS = "links"
+    IMAGES_ALT = "images_alt"
+    STRUCTURED_DATA = "structured_data"
+    PAGESPEED = "pagespeed"
+    SEARCH_CONSOLE = "search_console"
+    INTENT_COVERAGE = "intent_coverage"
+    COMPETITOR_DIFF = "competitor_diff"
+    BACKLINKS = "backlinks"
+    SERP_RANK = "serp_rank"
+    KEYWORD_RESEARCH = "keyword_research"
+    SITE_CRAWL = "site_crawl"
+    LOG_ANALYSIS = "log_analysis"
+    DUPLICATE_CANNIBALIZATION = "duplicate_cannibalization"
+
+
+class SnapshotType(str, Enum):
+    """Progress snapshot type (Appendix AC)"""
+    BEFORE = "before"
+    AFTER = "after"
+    PERIODIC = "periodic"
+
+
+class DraftStatus(str, Enum):
+    """Content draft status (Appendix AO)"""
+    DRAFT = "draft"
+    REVIEW = "review"
+    APPROVED = "approved"
+    PUBLISHED = "published"
+
+
+class TodoStatus(str, Enum):
+    """Todo item completion status (Appendix T)"""
+    OPEN = "open"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+    WONT_FIX = "wont_fix"
+
+
 # ============================================================
 # Site Models
 # ============================================================
@@ -492,3 +544,225 @@ class ReportRegenerateResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     time: datetime
+
+
+# ============================================================
+# Analysis Checklist Models (Appendix V)
+# ============================================================
+
+class AnalysisCheckItem(BaseModel):
+    """Individual check item status (Appendix V)"""
+    status: AnalysisCheckStatus
+    notes: List[str] = []
+    evidence_ids: List[str] = []
+
+
+class AnalysisChecks(BaseModel):
+    """Analysis checklist for tracking executed analyses (Appendix V)"""
+    schema_version: str = "0.1"
+    checks: Dict[str, AnalysisCheckItem] = {}
+
+
+# ============================================================
+# Progress Snapshot Models (Appendix AC)
+# ============================================================
+
+class ProgressSnapshotCreate(BaseModel):
+    """Create a progress snapshot"""
+    snapshot_type: SnapshotType
+    pagespeed_score: Optional[int] = None
+    intent_missing_count: Optional[int] = None
+    avg_position: Optional[float] = None
+    ctr: Optional[float] = None
+    todo_total: Optional[int] = None
+    todo_done: Optional[int] = None
+    metrics_json: Optional[Dict[str, Any]] = None
+
+
+class ProgressSnapshotResponse(BaseModel):
+    """Progress snapshot response"""
+    id: UUID
+    site_id: UUID
+    result_id: Optional[UUID] = None
+    snapshot_type: SnapshotType
+    pagespeed_score: Optional[int] = None
+    intent_missing_count: Optional[int] = None
+    avg_position: Optional[float] = None
+    ctr: Optional[float] = None
+    todo_total: Optional[int] = None
+    todo_done: Optional[int] = None
+    metrics_json: Optional[Dict[str, Any]] = None
+    created_at: datetime
+
+
+class ProgressComparisonResponse(BaseModel):
+    """Before/After progress comparison (Appendix AC)"""
+    before: Optional[ProgressSnapshotResponse] = None
+    after: Optional[ProgressSnapshotResponse] = None
+    delta: Optional[Dict[str, Any]] = None
+
+
+# ============================================================
+# Time Series Models (Appendix AD, AE, AF)
+# ============================================================
+
+class SerpTimeSeriesItem(BaseModel):
+    """SERP ranking time series item (Appendix AD)"""
+    id: UUID
+    site_id: UUID
+    query: str
+    position: float
+    recorded_date: datetime
+    url: Optional[str] = None
+    device: DeviceType = DeviceType.MOBILE
+
+
+class CrawlErrorTimeSeriesItem(BaseModel):
+    """Crawl error time series item (Appendix AE)"""
+    id: UUID
+    site_id: UUID
+    error_type: str
+    error_count: int
+    recorded_date: datetime
+    sample_urls: Optional[List[str]] = None
+
+
+class BacklinkTimeSeriesItem(BaseModel):
+    """Backlink time series item (Appendix AF)"""
+    id: UUID
+    site_id: UUID
+    total_backlinks: int
+    referring_domains: int
+    recorded_date: datetime
+    new_backlinks: Optional[int] = None
+    lost_backlinks: Optional[int] = None
+
+
+# ============================================================
+# Keyword Architecture Models (Appendix AL)
+# ============================================================
+
+class KeywordClusterCreate(BaseModel):
+    """Create a keyword cluster"""
+    cluster_name: str
+    primary_keyword: str
+    keywords: List[str] = []
+    intent_type: Optional[str] = None
+
+
+class KeywordClusterResponse(BaseModel):
+    """Keyword cluster response"""
+    id: UUID
+    site_id: UUID
+    cluster_name: str
+    primary_keyword: str
+    keywords: List[str]
+    intent_type: Optional[str] = None
+    created_at: datetime
+
+
+class CannibalizationIssueResponse(BaseModel):
+    """Cannibalization issue response (Appendix AL)"""
+    id: UUID
+    site_id: UUID
+    query: str
+    competing_urls: List[str]
+    severity: str
+    recommendation: Optional[str] = None
+    detected_at: datetime
+    resolved_at: Optional[datetime] = None
+
+
+# ============================================================
+# Content Draft Models (Appendix AO)
+# ============================================================
+
+class DraftSectionCreate(BaseModel):
+    """Create a draft section"""
+    section_type: str
+    heading: str
+    content: str
+    sort_order: int = 0
+
+
+class DraftSectionResponse(BaseModel):
+    """Draft section response"""
+    id: UUID
+    draft_id: UUID
+    section_type: str
+    heading: str
+    content: str
+    sort_order: int
+    created_at: datetime
+
+
+class ContentDraftCreate(BaseModel):
+    """Create a content draft"""
+    page_id: UUID
+    title: str
+    meta_description: Optional[str] = None
+    sections: List[DraftSectionCreate] = []
+
+
+class ContentDraftResponse(BaseModel):
+    """Content draft response"""
+    id: UUID
+    page_id: UUID
+    title: str
+    meta_description: Optional[str] = None
+    status: DraftStatus
+    created_at: datetime
+    updated_at: datetime
+    sections: List[DraftSectionResponse] = []
+
+
+# ============================================================
+# Extended Todo Models (Appendix T)
+# ============================================================
+
+class TodoItemCreate(BaseModel):
+    """Create a todo item with extended fields (Appendix T)"""
+    result_id: UUID
+    priority: TodoPriority
+    category: TodoCategory
+    title: str
+    details: Optional[str] = None
+    impact: TodoImpact = TodoImpact.MEDIUM
+    effort: TodoEffort = TodoEffort.MEDIUM
+    source_checks: List[str] = []
+    evidence_refs: List[str] = []
+    detail_json: Optional[Dict[str, Any]] = None
+
+
+class TodoItemUpdate(BaseModel):
+    """Update a todo item"""
+    status: Optional[TodoStatus] = None
+    assignee: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class TodoItemResponse(BaseModel):
+    """Todo item response with extended fields (Appendix T)"""
+    id: UUID
+    result_id: UUID
+    priority: TodoPriority
+    category: TodoCategory
+    title: str
+    details: Optional[str] = None
+    impact: TodoImpact
+    effort: TodoEffort
+    status: TodoStatus
+    source_checks: List[str]
+    evidence_refs: List[str]
+    detail_json: Optional[Dict[str, Any]] = None
+    assignee: Optional[str] = None
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class TodoListResponse(BaseModel):
+    """Todo list response"""
+    items: List[TodoItemResponse]
+    total: int
+    by_priority: Dict[str, int] = {}
+    by_status: Dict[str, int] = {}

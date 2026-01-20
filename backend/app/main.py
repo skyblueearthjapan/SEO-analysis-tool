@@ -12,6 +12,7 @@ from app.config import get_settings
 from app.database import init_db
 from app.models.schemas import HealthResponse
 from app.routers import jobs_router, pages_router, results_router, sites_router
+from app.routers.progress import router as progress_router
 
 
 @asynccontextmanager
@@ -62,6 +63,11 @@ app.include_router(
     results_router,
     prefix="/api/v1/sites/{site_id}/analysis-results",
     tags=["results"]
+)
+app.include_router(
+    progress_router,
+    prefix="/api/v1/sites",
+    tags=["progress"]
 )
 
 

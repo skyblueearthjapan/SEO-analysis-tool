@@ -19,6 +19,7 @@ from app.models.db_models import (
     Page,
 )
 from app.services.ai_reporter import build_ai_prompt_payload, generate_report_md
+from app.services.checks import AnalysisContext, build_analysis_checks
 from app.services.comparator import build_comparisons
 from app.services.fetcher import compute_mobile_hint, http_fetch
 from app.services.gsc_client import (
@@ -31,6 +32,16 @@ from app.services.pagespeed_client import pagespeed_fetch
 from app.services.parser_html import parse_html
 from app.services.parser_schema import extract_structured_data
 from app.services.rule_engine import run_rule_engine
+from app.services.progress import save_progress_snapshot, extract_metrics_from_result
+from app.services.analyzers import (
+    collect_serp_timeseries,
+    collect_crawl_errors,
+    collect_backlinks,
+)
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 async def run_analysis_job(job_id: UUID, db_url: str):
@@ -121,6 +132,14 @@ async def run_analysis_job(job_id: UUID, db_url: str):
                 )
                 db.add(report_record)
 
+            # Persist time series and snapshot (must not fail the run)
+            await _post_run_persist_timeseries_and_snapshot(
+                db=db,
+                job=job,
+                result_record=result_record,
+                analysis_result=analysis_result,
+            )
+
             # Update job status
             job.status = "done"
             job.finished_at = datetime.utcnow()
@@ -184,6 +203,52 @@ async def _run_analysis(
     # Build AI prompt payload
     ai_payload = build_ai_prompt_payload(pages, comparisons, diagnosis, todos, cfg)
 
+    # Build analysis checks (Appendix V)
+    # Count competitors
+    competitor_count = sum(
+        1 for p in pages
+        if p.get("page_type") in ["competitor_page", "third_party_profile_page"]
+    )
+
+    # Check PageSpeed/GSC availability from pages
+    pagespeed_ok = any(
+        p.get("tech", {}).get("pagespeed", {}).get("available", False)
+        for p in pages
+    )
+    gsc_ok = any(
+        p.get("search_console", {}).get("available", False)
+        for p in pages
+    )
+
+    # Build evidence IDs
+    evidence_ids: dict = {}
+    for page in pages:
+        page_id = page.get("page_id", "unknown")
+        evidence_ids.setdefault("fetch", []).append(f"ev_fetch_{page_id}")
+        evidence_ids.setdefault("html_basic", []).append(f"ev_html_meta_{page_id}")
+        evidence_ids.setdefault("headings", []).append(f"ev_headings_{page_id}")
+        evidence_ids.setdefault("text_stats", []).append(f"ev_text_stats_{page_id}")
+        evidence_ids.setdefault("links", []).append(f"ev_links_{page_id}")
+        evidence_ids.setdefault("images_alt", []).append(f"ev_images_{page_id}")
+        evidence_ids.setdefault("structured_data", []).append(f"ev_schema_{page_id}")
+        evidence_ids.setdefault("intent_coverage", []).append(f"ev_intent_{page_id}")
+
+        if page.get("tech", {}).get("pagespeed", {}).get("available"):
+            evidence_ids.setdefault("pagespeed", []).append(f"ev_pagespeed_{page_id}")
+        if page.get("search_console", {}).get("available"):
+            evidence_ids.setdefault("search_console", []).append(f"ev_gsc_{page_id}")
+
+    # Create context and build checks
+    analysis_ctx = AnalysisContext(
+        pagespeed_enabled=job.enable_pagespeed,
+        pagespeed_ok=pagespeed_ok,
+        gsc_enabled=job.enable_gsc and bool(job.gsc_property),
+        gsc_ok=gsc_ok,
+        competitor_count=competitor_count,
+        evidence_ids=evidence_ids
+    )
+    analysis_checks = build_analysis_checks(analysis_ctx)
+
     # Build inputs
     inputs = {
         "target_country": job.target_country,
@@ -205,6 +270,7 @@ async def _run_analysis(
         "comparisons": comparisons,
         "diagnosis": diagnosis,
         "todos": todos,
+        "analysis_checks": analysis_checks,
         "ai_prompt_payload": ai_payload
     }
 
@@ -364,3 +430,122 @@ async def _analyze_single_page(
         },
         "search_console": gsc_result
     }
+
+
+async def _post_run_persist_timeseries_and_snapshot(
+    db: AsyncSession,
+    job: AnalysisJob,
+    result_record: AnalysisResult,
+    analysis_result: Dict[str, Any],
+) -> None:
+    """
+    Called after a successful analysis run.
+    Writes time-series data (AD/AE/AF) and progress snapshot (AC).
+    Updates analysis_checks statuses accordingly.
+
+    IMPORTANT: Failures here must NOT break the run.
+    """
+    checks = analysis_result.get("analysis_checks", {}).get("checks", {})
+    pages = analysis_result.get("pages", [])
+
+    # --- SERP Time Series (Appendix AD)
+    if job.enable_gsc and job.gsc_property:
+        try:
+            serp_result = await collect_serp_timeseries(
+                db=db,
+                site_id=job.site_id,
+                pages=pages,
+                device=job.device,
+            )
+            if serp_result.success:
+                _mark_check_done(checks, "serp_rank")
+                logger.info(f"SERP timeseries saved: {serp_result.records_saved} records")
+            else:
+                _mark_check_partial(checks, "serp_rank", serp_result.error or "unknown error")
+        except Exception as e:
+            logger.exception("SERP timeseries save failed")
+            _mark_check_partial(checks, "serp_rank", f"save failed: {type(e).__name__}")
+    else:
+        _mark_check_skipped(checks, "serp_rank", "GSC not configured")
+
+    # --- Crawl Errors Time Series (Appendix AE)
+    try:
+        crawl_result = await collect_crawl_errors(
+            db=db,
+            site_id=job.site_id,
+            pages=pages,
+        )
+        if crawl_result.success:
+            # Already marked as not_supported in build_analysis_checks
+            # Update to done if we actually collected data
+            if crawl_result.records_saved > 0:
+                _mark_check_partial(checks, "site_crawl", f"basic: {crawl_result.records_saved} error types tracked")
+            logger.info(f"Crawl error timeseries saved: {crawl_result.records_saved} records")
+        else:
+            _mark_check_partial(checks, "site_crawl", crawl_result.error or "unknown error")
+    except Exception as e:
+        logger.exception("Crawl error timeseries save failed")
+        _mark_check_partial(checks, "site_crawl", f"save failed: {type(e).__name__}")
+
+    # --- Backlinks Time Series (Appendix AF)
+    try:
+        backlink_result = await collect_backlinks(
+            db=db,
+            site_id=job.site_id,
+            pages=pages,
+            external_api_enabled=False,  # TODO: Make configurable
+        )
+        if backlink_result.success and backlink_result.records_saved > 0:
+            _mark_check_partial(checks, "backlinks", f"internal estimate: {backlink_result.records_saved} records")
+            logger.info(f"Backlink timeseries saved: {backlink_result.records_saved} records")
+    except Exception as e:
+        logger.exception("Backlink timeseries save failed")
+        # Don't update backlinks check - keep as not_supported
+
+    # --- Progress Snapshot (Appendix AC)
+    try:
+        metrics = extract_metrics_from_result(analysis_result)
+        await save_progress_snapshot(
+            db=db,
+            site_id=job.site_id,
+            result_id=result_record.result_id,
+            snapshot_type="periodic",
+            metrics=metrics,
+        )
+        logger.info(f"Progress snapshot saved for site {job.site_id}")
+    except Exception as e:
+        logger.exception("Progress snapshot save failed")
+        # Progress snapshot failure is logged but doesn't affect checks
+
+    # Update the analysis_checks in the result
+    analysis_result["analysis_checks"]["checks"] = checks
+
+
+def _ensure_check(checks: Dict[str, Any], code: str) -> Dict[str, Any]:
+    """Ensure check item exists in checks dict"""
+    if code not in checks:
+        checks[code] = {"status": "not_supported", "notes": [], "evidence_ids": []}
+    item = checks[code]
+    if "notes" not in item:
+        item["notes"] = []
+    return item
+
+
+def _mark_check_done(checks: Dict[str, Any], code: str) -> None:
+    """Mark a check as done"""
+    item = _ensure_check(checks, code)
+    item["status"] = "done"
+
+
+def _mark_check_skipped(checks: Dict[str, Any], code: str, reason: str) -> None:
+    """Mark a check as skipped with reason"""
+    item = _ensure_check(checks, code)
+    item["status"] = "skipped"
+    item["notes"].append(reason)
+
+
+def _mark_check_partial(checks: Dict[str, Any], code: str, reason: str) -> None:
+    """Mark a check as partial with reason"""
+    item = _ensure_check(checks, code)
+    item["status"] = "partial"
+    item["notes"].append(reason)

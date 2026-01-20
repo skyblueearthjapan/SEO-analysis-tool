@@ -1,3 +1,5 @@
+export { routes } from "./routes";
+
 export class ApiError extends Error {
   status: number;
   payload?: any;

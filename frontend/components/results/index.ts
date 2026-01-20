@@ -3,3 +3,4 @@ export { TodoCard } from "./TodoCard";
 export { TodoBoard } from "./TodoBoard";
 export { ReportMarkdown } from "./ReportMarkdown";
 export { ResultHeader } from "./ResultHeader";
+export { AnalysisChecklistPanel } from "./AnalysisChecklistPanel";

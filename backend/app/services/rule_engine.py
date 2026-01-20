@@ -5,6 +5,8 @@ Rule Engine - スコアリング + 原因推定 + ToDo生成
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
+from app.services.checks import infer_source_checks
+
 
 def compute_technical_score(
     pagespeed_score: Optional[int],
@@ -675,9 +677,10 @@ def _create_todo(
     impact: str,
     effort: str,
     examples: Optional[Dict[str, Any]] = None,
-    detail: Optional[Dict[str, Any]] = None
+    detail: Optional[Dict[str, Any]] = None,
+    source_checks: Optional[List[str]] = None
 ) -> Dict[str, Any]:
-    """Create a ToDo object"""
+    """Create a ToDo object with source_checks (Appendix V)"""
     todo = {
         "todo_id": str(uuid4()),
         "priority": priority,
@@ -692,6 +695,13 @@ def _create_todo(
         todo["examples"] = examples
     if detail:
         todo["detail"] = detail
+
+    # Add source_checks - either explicit or inferred (Appendix V)
+    if source_checks:
+        todo["source_checks"] = source_checks
+    else:
+        todo["source_checks"] = infer_source_checks(todo)
+
     return todo
 
 

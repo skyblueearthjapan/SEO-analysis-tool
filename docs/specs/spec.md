@@ -4955,8 +4955,756 @@ When ready, add in job response:
 
 ---
 
+# Appendix M: RunConfigCard / TargetSummaryCard / JobHistoryList
+
+**Scope**:
+- Props (TypeScript interfaces)
+- UI骨組み（実装寄り）
+- 状態管理（RunScreenでの使い方）
+- API接続（jobs list / job detail / create job）
+
+**Assumptions**:
+- Next.js App Router
+- Tailwind
+- lucide-react
+- `lib/api/queries.ts` が既にある（createAnalysisJob, getJob, listJobs を追加/利用）
+- `AnalysisJob` 型に `result_id?: UUID | null` を追加推奨（done時に結果へ直行）
+
+---
+
+## M-0. API追加（jobs list）
+
+### M-0.1 lib/api/types.ts (add)
+
+```ts
+export interface AnalysisJobListItem {
+  job_id: UUID;
+  site_id: UUID;
+  status: JobStatus;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  error_message?: string | null;
+  // Recommended:
+  result_id?: UUID | null;
+}
+```
+
+### M-0.2 lib/api/queries.ts (add)
+
+```ts
+import type { AnalysisJobListItem } from "./types";
+import { apiFetch } from "./client";
+import { routes } from "./routes";
+import type { UUID } from "./types";
+
+export async function listJobs(siteId: UUID, limit = 20): Promise<{ items: AnalysisJobListItem[] }> {
+  return apiFetch(`${routes.jobs(siteId)}?limit=${limit}`);
+}
+```
+
+### M-0.3 Backend expectation (minimal)
+
+`GET /sites/{site_id}/analysis-jobs?limit=20` returns:
+
+```json
+{
+  "items": [
+    {
+      "job_id": "...",
+      "status": "done",
+      "created_at": "...",
+      "finished_at": "...",
+      "error_message": null,
+      "result_id": "..."
+    }
+  ]
+}
+```
+
+---
+
+## M-1. RunConfigCard
+
+### M-1.1 Props
+
+```ts
+// components/run/RunConfigCard.types.ts
+import type { DeviceType } from "@/lib/api/types";
+
+export interface RunConfigCardProps {
+  device: DeviceType;
+  onDeviceChange: (v: DeviceType) => void;
+
+  enablePagespeed: boolean;
+  onEnablePagespeed: (v: boolean) => void;
+
+  enableGsc: boolean;
+  onEnableGsc: (v: boolean) => void;
+
+  gscProperty: string;
+  onGscProperty: (v: string) => void;
+
+  brandTerms: string[];
+  onBrandTerms: (terms: string[]) => void;
+
+  reportStyle: "consultant" | "concise" | "technical";
+  onReportStyle: (v: RunConfigCardProps["reportStyle"]) => void;
+}
+```
+
+### M-1.2 UI実装（`components/run/RunConfigCard.tsx`）
+
+> 視認性重視：セクション分割＋トグル風ボタン。brand termsは "chips input" 風。
+
+```tsx
+// components/run/RunConfigCard.tsx
+"use client";
+
+import * as React from "react";
+import type { RunConfigCardProps } from "./RunConfigCard.types";
+import { GlassCard } from "@/components/layout/GlassCard";
+import { cn } from "@/lib/utils/cn";
+import { Monitor, Smartphone, Gauge, Search, Sparkles } from "lucide-react";
+
+function SectionTitle({ children }: { children: React.ReactNode }) {
+  return <div className="text-xs font-semibold tracking-wide text-muted-foreground">{children}</div>;
+}
+
+function TogglePill({
+  active,
+  label,
+  icon,
+  onClick
+}: {
+  active: boolean;
+  label: string;
+  icon?: React.ReactNode;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs",
+        "border-[rgba(var(--border),0.14)] bg-[rgba(var(--panel),0.06)]",
+        active && "shadow-[0_0_0_1px_rgba(var(--cyan),0.25),var(--glow-cyan)]"
+      )}
+    >
+      {icon}
+      <span className="font-medium">{label}</span>
+    </button>
+  );
+}
+
+function ChipsInput({
+  value,
+  onChange,
+  placeholder
+}: {
+  value: string[];
+  onChange: (v: string[]) => void;
+  placeholder?: string;
+}) {
+  const [draft, setDraft] = React.useState("");
+
+  const add = () => {
+    const t = draft.trim();
+    if (!t) return;
+    if (value.includes(t)) {
+      setDraft("");
+      return;
+    }
+    onChange([...value, t].slice(0, 12));
+    setDraft("");
+  };
+
+  const remove = (t: string) => onChange(value.filter((x) => x !== t));
+
+  return (
+    <div className="rounded-[var(--r-md)] border p-3 bg-[rgba(var(--panel),0.06)] border-[rgba(var(--border),0.12)]">
+      <div className="flex flex-wrap gap-2">
+        {value.map((t) => (
+          <button
+            key={t}
+            type="button"
+            onClick={() => remove(t)}
+            className="rounded-full border px-3 py-1 text-xs
+                       border-[rgba(var(--border),0.14)] bg-[rgba(var(--panel),0.06)]
+                       hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.20)] transition"
+            title="クリックで削除"
+          >
+            {t}
+          </button>
+        ))}
+        <input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              add();
+            }
+          }}
+          placeholder={placeholder}
+          className="min-w-[160px] flex-1 bg-transparent text-sm outline-none placeholder:text-[rgba(var(--fg),0.45)]"
+        />
+        <button
+          type="button"
+          onClick={add}
+          className="rounded-full border px-3 py-1 text-xs
+                     border-[rgba(var(--cyan),0.20)] bg-[rgba(var(--cyan),0.08)]
+                     hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.22),var(--glow-cyan)] transition"
+        >
+          Add
+        </button>
+      </div>
+      <div className="mt-2 text-[11px] text-muted-foreground-2">
+        例：劇団名 / 社会人演劇 / 地域名（ブランド検索・指名検索の判定に利用）
+      </div>
+    </div>
+  );
+}
+
+export function RunConfigCard(props: RunConfigCardProps) {
+  return (
+    <GlassCard className="p-5">
+      <div className="flex items-center justify-between">
+        <div className="text-sm font-semibold tracking-tight">RUN CONFIG / 実行設定</div>
+        <div className="text-[10px] text-muted-foreground uppercase tracking-[0.18em]">
+          MVP
+        </div>
+      </div>
+
+      {/* Device */}
+      <div className="mt-5 space-y-2">
+        <SectionTitle>DEVICE</SectionTitle>
+        <div className="flex flex-wrap gap-2">
+          <TogglePill
+            active={props.device === "mobile"}
+            label="Mobile"
+            icon={<Smartphone className="h-4 w-4 opacity-70" />}
+            onClick={() => props.onDeviceChange("mobile")}
+          />
+          <TogglePill
+            active={props.device === "desktop"}
+            label="Desktop"
+            icon={<Monitor className="h-4 w-4 opacity-70" />}
+            onClick={() => props.onDeviceChange("desktop")}
+          />
+        </div>
+      </div>
+
+      {/* Toggles */}
+      <div className="mt-5 space-y-2">
+        <SectionTitle>OPTIONS</SectionTitle>
+        <div className="flex flex-wrap gap-2">
+          <TogglePill
+            active={props.enablePagespeed}
+            label={props.enablePagespeed ? "PageSpeed ON" : "PageSpeed OFF"}
+            icon={<Gauge className="h-4 w-4 opacity-70" />}
+            onClick={() => props.onEnablePagespeed(!props.enablePagespeed)}
+          />
+          <TogglePill
+            active={props.enableGsc}
+            label={props.enableGsc ? "GSC ON" : "GSC OFF"}
+            icon={<Search className="h-4 w-4 opacity-70" />}
+            onClick={() => props.onEnableGsc(!props.enableGsc)}
+          />
+          <TogglePill
+            active={props.reportStyle === "consultant"}
+            label="Consultant"
+            icon={<Sparkles className="h-4 w-4 opacity-70" />}
+            onClick={() => props.onReportStyle("consultant")}
+          />
+          <TogglePill
+            active={props.reportStyle === "concise"}
+            label="Concise"
+            onClick={() => props.onReportStyle("concise")}
+          />
+          <TogglePill
+            active={props.reportStyle === "technical"}
+            label="Technical"
+            onClick={() => props.onReportStyle("technical")}
+          />
+        </div>
+      </div>
+
+      {/* GSC property */}
+      {props.enableGsc && (
+        <div className="mt-5 space-y-2">
+          <SectionTitle>GSC PROPERTY</SectionTitle>
+          <div className="rounded-[var(--r-md)] border px-3 py-2 bg-[rgba(var(--panel),0.06)] border-[rgba(var(--border),0.12)]">
+            <input
+              value={props.gscProperty}
+              onChange={(e) => props.onGscProperty(e.target.value)}
+              placeholder="例: sc-domain:example.com"
+              className="w-full bg-transparent text-sm outline-none placeholder:text-[rgba(var(--fg),0.45)]"
+            />
+          </div>
+          <div className="text-[11px] text-muted-foreground-2">
+            Search Console API連携が有効な場合のみ利用されます
+          </div>
+        </div>
+      )}
+
+      {/* Brand terms */}
+      <div className="mt-5 space-y-2">
+        <SectionTitle>BRAND TERMS</SectionTitle>
+        <ChipsInput value={props.brandTerms} onChange={props.onBrandTerms} placeholder="キーワードを入力してEnter…" />
+      </div>
+    </GlassCard>
+  );
+}
+```
+
+---
+
+## M-2. TargetSummaryCard
+
+### M-2.1 Props
+
+```ts
+// components/run/TargetSummaryCard.types.ts
+import type { Page } from "@/lib/api/types";
+
+export interface TargetSummaryCardProps {
+  official: Page;
+  competitors: Page[];     // exactly 2 expected
+  thirdParties: Page[];    // optional
+}
+```
+
+### M-2.2 UI実装（`components/run/TargetSummaryCard.tsx`）
+
+> "実行前の最終確認"。ミスが最も出る箇所なので、強く見せる。
+
+```tsx
+// components/run/TargetSummaryCard.tsx
+"use client";
+
+import * as React from "react";
+import type { TargetSummaryCardProps } from "./TargetSummaryCard.types";
+import { GlassCard } from "@/components/layout/GlassCard";
+import { cn } from "@/lib/utils/cn";
+import { Crown, Swords, Link as LinkIcon } from "lucide-react";
+
+function Row({
+  icon,
+  title,
+  url,
+  sub
+}: {
+  icon: React.ReactNode;
+  title: string;
+  url: string;
+  sub?: string;
+}) {
+  return (
+    <div className="flex items-start gap-3 rounded-[var(--r-md)] border p-3 bg-[rgba(var(--panel),0.06)] border-[rgba(var(--border),0.12)]">
+      <div className="mt-0.5">{icon}</div>
+      <div className="min-w-0">
+        <div className="text-xs font-semibold">{title}</div>
+        {sub && <div className="text-[11px] text-muted-foreground">{sub}</div>}
+        <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+          <LinkIcon className="h-3.5 w-3.5 opacity-70" />
+          <span className="truncate">{url}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function TargetSummaryCard({ official, competitors, thirdParties }: TargetSummaryCardProps) {
+  return (
+    <GlassCard className="p-5">
+      <div className="flex items-center justify-between">
+        <div className="text-sm font-semibold tracking-tight">TARGETS / 対象URL</div>
+        <div className="text-[10px] text-muted-foreground uppercase tracking-[0.18em]">
+          confirm
+        </div>
+      </div>
+
+      <div className="mt-4 space-y-3">
+        <Row
+          icon={<Crown className="h-4 w-4" style={{ color: "rgba(var(--cyan),0.95)" }} />}
+          title={official.label || "Official"}
+          sub="公式サイト（必須）"
+          url={official.url}
+        />
+
+        {competitors.map((c, idx) => (
+          <Row
+            key={c.page_id}
+            icon={<Swords className="h-4 w-4" style={{ color: "rgba(var(--violet),0.95)" }} />}
+            title={c.label || `Competitor ${idx + 1}`}
+            sub="競合（必須: 2件）"
+            url={c.url}
+          />
+        ))}
+
+        {thirdParties.length > 0 ? (
+          <div className="pt-1">
+            <div className="mb-2 text-[11px] text-muted-foreground uppercase tracking-[0.18em]">
+              third-party pages
+            </div>
+            <div className="space-y-2">
+              {thirdParties.map((t) => (
+                <Row
+                  key={t.page_id}
+                  icon={<LinkIcon className="h-4 w-4 opacity-80" />}
+                  title={t.label || "Third-party"}
+                  sub="掲載/紹介ページ（任意）"
+                  url={t.url}
+                />
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="text-xs text-muted-foreground">
+            紹介記事ページは未選択（任意）
+          </div>
+        )}
+      </div>
+
+      <div className="mt-4 text-[11px] text-muted-foreground-2">
+        ※ 公式1 / 競合2 の組み合わせがMVPの想定です。対象が違う場合は pages 画面で修正してください。
+      </div>
+    </GlassCard>
+  );
+}
+```
+
+---
+
+## M-3. JobHistoryList (Run画面の右側、またはResults一覧の簡易版)
+
+### M-3.1 Props
+
+```ts
+// components/run/JobHistoryList.types.ts
+import type { AnalysisJobListItem, UUID } from "@/lib/api/types";
+
+export interface JobHistoryListProps {
+  siteId: UUID;
+  items: AnalysisJobListItem[];
+  onOpenJob?: (jobId: UUID) => void;
+  onOpenResult?: (resultId: UUID) => void;
+  onRefresh?: () => Promise<void>;
+}
+```
+
+### M-3.2 UI実装（`components/run/JobHistoryList.tsx`）
+
+> "運用感"が出る。MVPは最新10件で十分。
+
+```tsx
+// components/run/JobHistoryList.tsx
+"use client";
+
+import * as React from "react";
+import type { JobHistoryListProps } from "./JobHistoryList.types";
+import { GlassCard } from "@/components/layout/GlassCard";
+import { cn } from "@/lib/utils/cn";
+import { RefreshCcw, ArrowRight, AlertTriangle, CheckCircle2, Loader2, Clock } from "lucide-react";
+
+function statusIcon(status: string) {
+  if (status === "done") return <CheckCircle2 className="h-4 w-4" style={{ color: "rgba(var(--lime),0.95)" }} />;
+  if (status === "failed") return <AlertTriangle className="h-4 w-4" style={{ color: "rgba(var(--rose),0.95)" }} />;
+  if (status === "running") return <Loader2 className="h-4 w-4 animate-spin opacity-80" />;
+  return <Clock className="h-4 w-4 opacity-70" />;
+}
+
+function fmt(iso?: string | null) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return d.toLocaleString();
+}
+
+export function JobHistoryList({ items, onOpenJob, onOpenResult, onRefresh }: JobHistoryListProps) {
+  return (
+    <GlassCard className="p-5">
+      <div className="flex items-center justify-between">
+        <div className="text-sm font-semibold tracking-tight">JOB HISTORY / 実行履歴</div>
+        {onRefresh && (
+          <button
+            type="button"
+            onClick={() => onRefresh()}
+            className="rounded-full border px-3 py-2 text-xs
+                       border-[rgba(var(--border),0.14)] bg-[rgba(var(--panel),0.06)]
+                       hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.20),var(--glow-cyan)] transition"
+          >
+            <RefreshCcw className="h-4 w-4 opacity-80" />
+          </button>
+        )}
+      </div>
+
+      <div className="mt-4 space-y-2">
+        {items.length === 0 ? (
+          <div className="text-xs text-muted-foreground">まだ実行履歴がありません</div>
+        ) : (
+          items.map((j) => (
+            <div
+              key={j.job_id}
+              className="flex items-start gap-3 rounded-[var(--r-md)] border p-3
+                         bg-[rgba(var(--panel),0.06)] border-[rgba(var(--border),0.12)]"
+            >
+              <div className="mt-0.5">{statusIcon(j.status)}</div>
+
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs font-semibold">
+                    {j.status.toUpperCase()}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground uppercase tracking-[0.18em]">
+                    {fmt(j.created_at)}
+                  </div>
+                </div>
+
+                <div className="mt-1 text-[11px] text-muted-foreground">
+                  started {fmt(j.started_at)} / finished {fmt(j.finished_at)}
+                </div>
+
+                {j.error_message ? (
+                  <div className="mt-2 text-xs" style={{ color: "rgba(var(--rose),0.90)" }}>
+                    {j.error_message}
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="flex flex-col gap-2">
+                {onOpenJob && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenJob(j.job_id)}
+                    className="rounded-full border px-3 py-2 text-xs
+                               border-[rgba(var(--border),0.14)] bg-[rgba(var(--panel),0.06)]
+                               hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.18)] transition"
+                  >
+                    Job
+                  </button>
+                )}
+
+                {j.result_id && onOpenResult && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenResult(j.result_id!)}
+                    className="rounded-full border px-3 py-2 text-xs font-semibold
+                               border-[rgba(var(--violet),0.22)] bg-[rgba(var(--violet),0.10)]
+                               hover:shadow-[0_0_0_1px_rgba(var(--violet),0.22),var(--glow-violet)] transition"
+                  >
+                    Result <ArrowRight className="ml-1 inline h-3.5 w-3.5 opacity-80" />
+                  </button>
+                )}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      <div className="mt-4 text-[10px] text-muted-foreground uppercase tracking-[0.18em]">
+        latest {items.length} jobs
+      </div>
+    </GlassCard>
+  );
+}
+```
+
+---
+
+## M-4. RunScreen 状態管理 + API接続（統合例）
+
+> Run画面に3つを組み込み。右側にTargetSummary + JobHistory を並べるのが"完成度高い"。
+
+```tsx
+// app/sites/[siteId]/run/RunScreenMVP.tsx
+"use client";
+
+import * as React from "react";
+import { useRouter } from "next/navigation";
+import type { UUID, AnalysisJobTarget, Page, AnalysisJobListItem } from "@/lib/api/types";
+import { createAnalysisJob, listJobs } from "@/lib/api/queries";
+import { useJobPoll } from "@/components/run/useJobPoll";
+import { RunConfigCard } from "@/components/run/RunConfigCard";
+import { TargetSummaryCard } from "@/components/run/TargetSummaryCard";
+import { JobStatusCard } from "@/components/run/JobStatusCard";
+import { JobHistoryList } from "@/components/run/JobHistoryList";
+import { RunTasksMorph } from "@/components/run/RunTasksMorph";
+
+export function RunScreenMVP({
+  siteId,
+  official,
+  competitors,
+  thirdParties,
+  apiTargets
+}: {
+  siteId: UUID;
+  official: Page;
+  competitors: Page[];
+  thirdParties: Page[];
+  apiTargets: AnalysisJobTarget[];
+}) {
+  const router = useRouter();
+
+  // Config
+  const [device, setDevice] = React.useState<"mobile" | "desktop">("mobile");
+  const [enablePagespeed, setEnablePagespeed] = React.useState(true);
+  const [enableGsc, setEnableGsc] = React.useState(false);
+  const [gscProperty, setGscProperty] = React.useState("");
+  const [brandTerms, setBrandTerms] = React.useState<string[]>([]);
+  const [reportStyle, setReportStyle] = React.useState<"consultant" | "concise" | "technical">("consultant");
+
+  // Job
+  const [jobId, setJobId] = React.useState<UUID | null>(null);
+  const { job, error, isPolling } = useJobPoll(siteId, jobId);
+
+  // History
+  const [history, setHistory] = React.useState<AnalysisJobListItem[]>([]);
+  const [historyLoading, setHistoryLoading] = React.useState(false);
+
+  const refreshHistory = async () => {
+    setHistoryLoading(true);
+    try {
+      const res = await listJobs(siteId, 10);
+      setHistory(res.items);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  React.useEffect(() => {
+    refreshHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [siteId]);
+
+  // Run button
+  const [running, setRunning] = React.useState(false);
+  const onRun = async () => {
+    setRunning(true);
+    try {
+      const res = await createAnalysisJob(siteId, {
+        device,
+        locale: "ja-JP",
+        target_country: "JP",
+        enable_pagespeed: enablePagespeed,
+        enable_gsc: enableGsc,
+        enable_ai_report: true,
+        gsc_property: enableGsc ? gscProperty : undefined,
+        brand_terms: brandTerms,
+        targets: apiTargets
+      });
+      setJobId(res.job_id as UUID);
+      refreshHistory();
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const onViewResult = () => {
+    // recommended: job has result_id when done
+    // if not, fallback to results list
+    // @ts-ignore
+    const rid = (job as any)?.result_id;
+    if (rid) router.push(`/sites/${siteId}/results/${rid}`);
+    else router.push(`/sites/${siteId}/results`);
+  };
+
+  const urlCount = 1 + competitors.length + thirdParties.length;
+
+  return (
+    <div className="grid gap-6 lg:grid-cols-2">
+      {/* Left: config + run */}
+      <div className="space-y-6">
+        <RunConfigCard
+          device={device}
+          onDeviceChange={setDevice}
+          enablePagespeed={enablePagespeed}
+          onEnablePagespeed={setEnablePagespeed}
+          enableGsc={enableGsc}
+          onEnableGsc={setEnableGsc}
+          gscProperty={gscProperty}
+          onGscProperty={setGscProperty}
+          brandTerms={brandTerms}
+          onBrandTerms={setBrandTerms}
+          reportStyle={reportStyle}
+          onReportStyle={setReportStyle}
+        />
+
+        <button
+          type="button"
+          onClick={onRun}
+          disabled={running || competitors.length !== 2}
+          className="w-full rounded-[var(--r-lg)] border px-5 py-4 text-sm font-semibold tracking-wide
+                     border-[rgba(var(--cyan),0.22)] bg-[rgba(var(--cyan),0.10)]
+                     hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.25),var(--glow-cyan)] transition
+                     disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {running ? "Launching…" : "RUN DIAGNOSTIC"}
+        </button>
+
+        {/* Morph row: preview → checklist */}
+        <RunTasksMorph
+          job={job}
+          device={device}
+          enablePagespeed={enablePagespeed}
+          enableGsc={enableGsc}
+          enableAiReport={true}
+          urlCount={urlCount}
+          competitorCount={competitors.length}
+          thirdPartyCount={thirdParties.length}
+        />
+
+        <JobStatusCard
+          job={job}
+          pollingError={error}
+          isPolling={isPolling}
+          onViewResult={job?.status === "done" ? onViewResult : undefined}
+          onRetry={job?.status === "failed" ? () => setJobId(null) : undefined}
+        />
+      </div>
+
+      {/* Right: targets + history */}
+      <div className="space-y-6">
+        <TargetSummaryCard official={official} competitors={competitors} thirdParties={thirdParties} />
+
+        <JobHistoryList
+          siteId={siteId}
+          items={history}
+          onRefresh={refreshHistory}
+          onOpenJob={(jid) => setJobId(jid)}
+          onOpenResult={(rid) => router.push(`/sites/${siteId}/results/${rid}`)}
+        />
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## M-5. Acceptance Criteria
+
+### RunConfigCard
+- [ ] device/Pagespeed/GSC/reportStyle/brandTerms が操作できる
+- [ ] enableGsc=true で property入力欄が出る
+
+### TargetSummaryCard
+- [ ] 公式1/競合2/紹介（任意）のURLが一覧で確認できる
+
+### JobHistoryList
+- [ ] 最新10件が表示され、status/datetimeが分かる
+- [ ] doneの場合 Resultボタンが出て結果へ遷移できる
+- [ ] クリックで過去jobを再表示（jobIdセット）できる
+
+### RunScreenMVP
+- [ ] Create job → polling → done で結果導線が出る
+- [ ] preview chips → checklist に自然に変形する
+
+---
+
 ## 次のステップ（必要なら追記）
 さらに追加が有効なコンポーネント:
-- `RunConfigCard`: device/pagespeed/GSC設定UI
-- `TargetSummaryCard`: 対象URL一覧表示
-- `JobHistoryList`: 過去の分析ジョブ一覧
+- `RunConfigCard` Preset（Default / Fast / Deep）で一括設定
+- `SiteCreateWizard`: サイト新規作成ウィザード
+- `PageEditModal`: ページURL編集/削除モーダル

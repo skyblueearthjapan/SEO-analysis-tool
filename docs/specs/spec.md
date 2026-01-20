@@ -4300,8 +4300,235 @@ export function RunScreen({
 
 ---
 
+# Appendix K: Estimated Tasks Row (Run button helper)
+
+**Goal**:
+- Runボタン直下に「何を・どれくらい」実行するかを1行で提示
+- 信頼感＋プロダクト感UP（地味に効く）
+- URL数/Pagespeed/GSC/AI report/想定時間（推定）を表示
+  - ※時間は"推定"として控えめに（実測で後から改善可能）
+
+**Includes**:
+- `components/run/EstimatedTasksRow.tsx`
+- wiring snippet for RunScreen
+
+---
+
+## K-1. EstimatedTasksRow Component
+
+> 視認性：小さく、でも読みやすく。monoで数字が締まる。
+> 表示は "チップ" で短く。
+
+```tsx
+// components/run/EstimatedTasksRow.tsx
+"use client";
+
+import * as React from "react";
+import { cn } from "@/lib/utils/cn";
+import type { DeviceType } from "@/lib/api/types";
+import { Zap, Cpu, Search, FileText, Gauge, Smartphone, Monitor } from "lucide-react";
+
+export interface EstimatedTasksRowProps {
+  urlCount: number;
+  competitorCount: number;
+  thirdPartyCount: number;
+
+  device: DeviceType;
+  enablePagespeed: boolean;
+  enableGsc: boolean;
+  enableAiReport: boolean;
+
+  /** Optional: provide real estimate if you have historical data */
+  estimatedSeconds?: number | null;
+}
+
+function Chip({
+  icon,
+  children,
+  tone = "neutral"
+}: {
+  icon?: React.ReactNode;
+  children: React.ReactNode;
+  tone?: "neutral" | "cyan" | "violet" | "amber";
+}) {
+  const style =
+    tone === "cyan"
+      ? "border-[rgba(var(--cyan),0.20)] bg-[rgba(var(--cyan),0.08)]"
+      : tone === "violet"
+      ? "border-[rgba(var(--violet),0.20)] bg-[rgba(var(--violet),0.08)]"
+      : tone === "amber"
+      ? "border-[rgba(var(--amber),0.20)] bg-[rgba(var(--amber),0.08)]"
+      : "border-[rgba(var(--border),0.14)] bg-[rgba(var(--panel),0.06)]";
+
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-2 rounded-full border px-3 py-1",
+        "text-[11px] text-muted-foreground",
+        style
+      )}
+    >
+      {icon}
+      <span className="font-medium">{children}</span>
+    </span>
+  );
+}
+
+function formatEstimate(sec?: number | null) {
+  if (!sec || sec <= 0) return "≈ —";
+  if (sec < 60) return `≈ ${sec}s`;
+  const m = Math.round(sec / 60);
+  return `≈ ${m}m`;
+}
+
+/**
+ * Lightweight estimation (MVP):
+ * - base: 8s
+ * - per url: +6s
+ * - pagespeed: +10s per url
+ * - gsc: +8s (official only)
+ * - ai report: +6s
+ * Clamp: 12s..240s
+ */
+function estimateSecondsFallback(args: {
+  urlCount: number;
+  enablePagespeed: boolean;
+  enableGsc: boolean;
+  enableAiReport: boolean;
+}) {
+  const base = 8;
+  const perUrl = 6 * args.urlCount;
+  const ps = args.enablePagespeed ? 10 * args.urlCount : 0;
+  const gsc = args.enableGsc ? 8 : 0;
+  const ai = args.enableAiReport ? 6 : 0;
+
+  const raw = base + perUrl + ps + gsc + ai;
+  return Math.max(12, Math.min(240, raw));
+}
+
+export function EstimatedTasksRow(props: EstimatedTasksRowProps) {
+  const {
+    urlCount,
+    competitorCount,
+    thirdPartyCount,
+    device,
+    enablePagespeed,
+    enableGsc,
+    enableAiReport
+  } = props;
+
+  const sec = props.estimatedSeconds ?? estimateSecondsFallback({ urlCount, enablePagespeed, enableGsc, enableAiReport });
+
+  const deviceIcon = device === "mobile" ? <Smartphone className="h-4 w-4 opacity-70" /> : <Monitor className="h-4 w-4 opacity-70" />;
+
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2">
+      <Chip icon={<Zap className="h-4 w-4 opacity-70" />} tone="cyan">
+        <span className="font-mono text-[11px]">{urlCount}</span> URLs
+      </Chip>
+
+      <Chip icon={<Cpu className="h-4 w-4 opacity-70" />}>
+        Competitors <span className="font-mono">{competitorCount}</span>
+      </Chip>
+
+      {thirdPartyCount > 0 ? (
+        <Chip icon={<Search className="h-4 w-4 opacity-70" />}>
+          Third-party <span className="font-mono">{thirdPartyCount}</span>
+        </Chip>
+      ) : null}
+
+      <Chip icon={deviceIcon}>{device === "mobile" ? "Mobile" : "Desktop"}</Chip>
+
+      {enablePagespeed ? (
+        <Chip icon={<Gauge className="h-4 w-4 opacity-70" />} tone="violet">
+          PageSpeed ON
+        </Chip>
+      ) : (
+        <Chip icon={<Gauge className="h-4 w-4 opacity-70" />}>PageSpeed OFF</Chip>
+      )}
+
+      {enableGsc ? (
+        <Chip icon={<Search className="h-4 w-4 opacity-70" />} tone="amber">
+          GSC ON
+        </Chip>
+      ) : (
+        <Chip icon={<Search className="h-4 w-4 opacity-70" />}>GSC OFF</Chip>
+      )}
+
+      {enableAiReport ? (
+        <Chip icon={<FileText className="h-4 w-4 opacity-70" />} tone="cyan">
+          AI report ON
+        </Chip>
+      ) : (
+        <Chip icon={<FileText className="h-4 w-4 opacity-70" />}>AI report OFF</Chip>
+      )}
+
+      <span className="ml-auto text-[11px] text-muted-foreground-2">
+        Estimated <span className="font-mono">{formatEstimate(sec)}</span>
+      </span>
+    </div>
+  );
+}
+```
+
+---
+
+## K-2. Wiring: Runボタン直下に追加 (RunScreen)
+
+> Runボタンの下に置くのがポイント（押す前に実行内容が分かる）。
+> 「3 URLs / pagespeed enabled / AI report enabled」的な信頼感が出ます。
+
+```tsx
+import { EstimatedTasksRow } from "@/components/run/EstimatedTasksRow";
+
+/* ...inside RunScreen return... */
+
+<button
+  type="button"
+  onClick={onRun}
+  disabled={running || !targets.official || targets.competitors.length !== 2}
+  className="w-full rounded-[var(--r-lg)] border px-5 py-4 text-sm font-semibold tracking-wide
+             border-[rgba(var(--cyan),0.22)] bg-[rgba(var(--cyan),0.10)]
+             hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.25),var(--glow-cyan)] transition
+             disabled:opacity-50 disabled:cursor-not-allowed"
+>
+  {running ? "Launching…" : "RUN DIAGNOSTIC"}
+</button>
+
+<EstimatedTasksRow
+  urlCount={1 + targets.competitors.length + targets.thirdParties.length}
+  competitorCount={targets.competitors.length}
+  thirdPartyCount={targets.thirdParties.length}
+  device={device}
+  enablePagespeed={enablePagespeed}
+  enableGsc={enableGsc}
+  enableAiReport={true}
+/>
+```
+
+---
+
+## K-3. (Optional) Better estimates later
+
+MVPの推定は簡易なので、次の段階で精度UPできます：
+
+1. `analysis_jobs` に `started_at/finished_at` があるので、実測 duration を記録
+2. `daily_metrics` とは別に `job_durations` を作るか、jobsに `duration_ms` を保存
+3. 直近N回の平均で `estimatedSeconds` を算出して `EstimatedTasksRow` に渡す
+
+---
+
+## K-4. Acceptance Criteria
+
+- [ ] Runボタン直下にチップ群が表示される
+- [ ] URL数/Pagespeed/GSC/AI report が一目で分かる
+- [ ] 推定時間は "≈" 表記で控えめ（過信させない）
+
+---
+
 ## 次のステップ（必要なら追記）
 さらに追加が有効なコンポーネント:
 - `RunConfigCard`: device/pagespeed/GSC設定UI
 - `TargetSummaryCard`: 対象URL一覧表示
 - `JobHistoryList`: 過去の分析ジョブ一覧
+- 実行中タスクチェックリスト変形（chips → checklist）

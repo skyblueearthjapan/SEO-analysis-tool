@@ -5703,8 +5703,279 @@ export function RunScreenMVP({
 
 ---
 
+# Appendix N: RunConfig Presets (Default / Fast / Deep)
+
+**Goal**:
+- RunConfigCard 右上に "Preset" を追加（ResultHeaderと同じ雰囲気）
+- 1クリックで設定を切り替え（pagespeed / gsc / reportStyle / device など）
+- UX:
+  - 現在の設定がどのPresetに近いかが分かる（active表示）
+  - 適用時に小さくフィードバック（"Preset applied"）
+
+**Includes**:
+- Preset definition (`lib/run/presets.ts`)
+- PresetPills UI (`components/run/RunPresetPills.tsx`)
+- RunConfigCard integration snippet
+
+---
+
+## N-1. Preset Definitions（`lib/run/presets.ts`）
+
+> MVPのpreset定義。後でconfig化も可能（server側で返すでもOK）。
+
+```ts
+// lib/run/presets.ts
+import type { DeviceType } from "@/lib/api/types";
+import type { RunConfigCardProps } from "@/components/run/RunConfigCard.types";
+
+export type RunPresetKey = "default" | "fast" | "deep";
+
+export interface RunPreset {
+  key: RunPresetKey;
+  label: string;
+  sub: string;
+  apply: {
+    device?: DeviceType;
+    enablePagespeed?: boolean;
+    enableGsc?: boolean;
+    reportStyle?: RunConfigCardProps["reportStyle"];
+  };
+}
+
+export const RUN_PRESETS: RunPreset[] = [
+  {
+    key: "default",
+    label: "Default",
+    sub: "balanced",
+    apply: {
+      device: "mobile",
+      enablePagespeed: true,
+      enableGsc: false,
+      reportStyle: "consultant"
+    }
+  },
+  {
+    key: "fast",
+    label: "Fast",
+    sub: "quick check",
+    apply: {
+      device: "mobile",
+      enablePagespeed: false,
+      enableGsc: false,
+      reportStyle: "concise"
+    }
+  },
+  {
+    key: "deep",
+    label: "Deep",
+    sub: "thorough",
+    apply: {
+      device: "desktop",
+      enablePagespeed: true,
+      enableGsc: true,
+      reportStyle: "technical"
+    }
+  }
+];
+
+export function detectPreset(current: {
+  device: DeviceType;
+  enablePagespeed: boolean;
+  enableGsc: boolean;
+  reportStyle: RunConfigCardProps["reportStyle"];
+}): RunPresetKey | null {
+  const match = RUN_PRESETS.find((p) => {
+    const a = p.apply;
+    return (
+      (a.device ?? current.device) === current.device &&
+      (a.enablePagespeed ?? current.enablePagespeed) === current.enablePagespeed &&
+      (a.enableGsc ?? current.enableGsc) === current.enableGsc &&
+      (a.reportStyle ?? current.reportStyle) === current.reportStyle
+    );
+  });
+  return match?.key ?? null;
+}
+```
+
+---
+
+## N-2. RunPresetPills Component
+
+> ResultHeaderのActionボタンに近い "丸ピル" スタイル。
+> active時はネオンの輪郭。
+
+```tsx
+// components/run/RunPresetPills.tsx
+"use client";
+
+import * as React from "react";
+import { cn } from "@/lib/utils/cn";
+import { RUN_PRESETS, detectPreset, type RunPresetKey } from "@/lib/run/presets";
+import { Zap, Layers, SlidersHorizontal, Check } from "lucide-react";
+
+export interface RunPresetPillsProps {
+  value: {
+    device: "mobile" | "desktop";
+    enablePagespeed: boolean;
+    enableGsc: boolean;
+    reportStyle: "consultant" | "concise" | "technical";
+  };
+  onApplyPreset: (key: RunPresetKey) => void;
+}
+
+function presetIcon(key: RunPresetKey) {
+  if (key === "fast") return <Zap className="h-4 w-4 opacity-80" />;
+  if (key === "deep") return <Layers className="h-4 w-4 opacity-80" />;
+  return <SlidersHorizontal className="h-4 w-4 opacity-80" />;
+}
+
+export function RunPresetPills({ value, onApplyPreset }: RunPresetPillsProps) {
+  const active = detectPreset(value);
+  const [applied, setApplied] = React.useState<RunPresetKey | null>(null);
+
+  const apply = (k: RunPresetKey) => {
+    onApplyPreset(k);
+    setApplied(k);
+    setTimeout(() => setApplied(null), 900);
+  };
+
+  return (
+    <div className="flex items-center gap-2">
+      <div className="text-[10px] text-muted-foreground uppercase tracking-[0.18em] mr-1">
+        Preset
+      </div>
+
+      {RUN_PRESETS.map((p) => {
+        const isActive = active === p.key;
+        const justApplied = applied === p.key;
+
+        return (
+          <button
+            key={p.key}
+            type="button"
+            onClick={() => apply(p.key)}
+            className={cn(
+              "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs",
+              "border-[rgba(var(--border),0.14)] bg-[rgba(var(--panel),0.06)]",
+              "hover:shadow-[0_0_0_1px_rgba(var(--cyan),0.18),var(--glow-cyan)] transition",
+              isActive && "shadow-[0_0_0_1px_rgba(var(--cyan),0.25),var(--glow-cyan)]"
+            )}
+            title={`${p.label} — ${p.sub}`}
+          >
+            {justApplied ? <Check className="h-4 w-4 opacity-80" /> : presetIcon(p.key)}
+            <span className="font-medium">{p.label}</span>
+            <span className="text-[10px] text-muted-foreground uppercase tracking-wider">{p.sub}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+```
+
+---
+
+## N-3. RunConfigCard Integration
+
+### N-3.1 RunConfigCardProps 追加（推奨）
+
+```ts
+export interface RunConfigCardProps {
+  /* existing... */
+  // Add optional preset apply hook
+  onApplyPreset?: (key: "default" | "fast" | "deep") => void;
+}
+```
+
+### N-3.2 RunConfigCard.tsx のヘッダー差し替え例
+
+> RunConfigCard のヘッダー右側にPresetを表示。
+> apply時は props の setter を呼ぶだけ。
+
+```tsx
+import { RunPresetPills } from "@/components/run/RunPresetPills";
+import { RUN_PRESETS } from "@/lib/run/presets";
+
+/* inside RunConfigCard component header */
+<div className="flex items-center justify-between">
+  <div className="text-sm font-semibold tracking-tight">RUN CONFIG / 実行設定</div>
+
+  <RunPresetPills
+    value={{
+      device: props.device,
+      enablePagespeed: props.enablePagespeed,
+      enableGsc: props.enableGsc,
+      reportStyle: props.reportStyle
+    }}
+    onApplyPreset={(key) => {
+      const preset = RUN_PRESETS.find((p) => p.key === key)!;
+
+      if (preset.apply.device) props.onDeviceChange(preset.apply.device);
+      if (typeof preset.apply.enablePagespeed === "boolean") props.onEnablePagespeed(preset.apply.enablePagespeed);
+      if (typeof preset.apply.enableGsc === "boolean") props.onEnableGsc(preset.apply.enableGsc);
+      if (preset.apply.reportStyle) props.onReportStyle(preset.apply.reportStyle);
+
+      // optional: deep preset + empty property -> hint value
+      if (key === "deep" && !props.gscProperty) {
+        props.onGscProperty("sc-domain:");
+      }
+
+      props.onApplyPreset?.(key);
+    }}
+  />
+</div>
+```
+
+---
+
+## N-4. RunScreen Wiring (state management)
+
+> RunConfigCardに `onApplyPreset` を渡せば、必要ならログやUI通知に使える。
+
+```tsx
+<RunConfigCard
+  device={device}
+  onDeviceChange={setDevice}
+  enablePagespeed={enablePagespeed}
+  onEnablePagespeed={setEnablePagespeed}
+  enableGsc={enableGsc}
+  onEnableGsc={setEnableGsc}
+  gscProperty={gscProperty}
+  onGscProperty={setGscProperty}
+  brandTerms={brandTerms}
+  onBrandTerms={setBrandTerms}
+  reportStyle={reportStyle}
+  onReportStyle={setReportStyle}
+  onApplyPreset={(key) => {
+    // optional: analytics/log
+    // console.log("Preset applied:", key);
+  }}
+/>
+```
+
+---
+
+## N-5. UX Notes (重要)
+
+- **Presetは "強制" ではなく "ショートカット"**
+  - ユーザーは適用後に細かくトグルを変更できる
+- **Active判定は `detectPreset()` で自動**（気持ち良い）
+- **GSCは環境によって使えない場合がある**
+  - Deepを押しても "GSC ON だけど未連携なら無効化" はバック側で安全に処理
+
+---
+
+## N-6. Acceptance Criteria
+
+- [ ] RunConfigCard右上に Preset pills が表示
+- [ ] クリックで device/pagespeed/gsc/reportStyle が即反映
+- [ ] 現在設定がPreset一致なら active 表示になる
+- [ ] Deep適用時に gscProperty が空なら `sc-domain:` が入る（任意）
+
+---
+
 ## 次のステップ（必要なら追記）
 さらに追加が有効なコンポーネント:
-- `RunConfigCard` Preset（Default / Fast / Deep）で一括設定
 - `SiteCreateWizard`: サイト新規作成ウィザード
 - `PageEditModal`: ページURL編集/削除モーダル
+- `SiteListPage`: サイト一覧画面
